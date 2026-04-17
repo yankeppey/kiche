@@ -15,12 +15,6 @@ import kotlinx.io.*
 import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 
-private fun log(msg: String) {
-    val t = System.currentTimeMillis() % 100_000 // last 5 digits for readability
-    val thread = Thread.currentThread().name.takeLast(30)
-    println("[KICHE $t $thread] $msg")
-}
-
 /**
  * Manages a single QUIC + HTTP/3 connection to a specific host:port.
  *
@@ -96,7 +90,6 @@ internal class KicheEndpoint(
             )
             // Flush immediately so request headers hit the wire without waiting for event loop
             drainSendLocked()
-            log("execute: registered stream $id, hasBody=${bodyChannel != null}, totalStreams=${streams.size}")
             id
         }
 
@@ -121,8 +114,6 @@ internal class KicheEndpoint(
         val c = conn
         if (c != null && !c.isClosed) return@withLock
 
-        log("ensureConnected: starting new connection to $host:$port")
-
         // Detach old connection from fields — the old event loop's finally block
         // will close the native objects it captured at launch.
         detachConnectionLocked()
@@ -134,7 +125,6 @@ internal class KicheEndpoint(
         val peerAddr = KicheAddress(ip = peerIp, port = port)
 
         // Bind local UDP socket
-        log("ensureConnected: binding UDP socket")
         val socket = aSocket(selectorManager).udp().bind(InetSocketAddress("0.0.0.0", 0))
         val localSocketAddr = socket.localAddress as InetSocketAddress
         val localAddr = KicheAddress(
@@ -160,16 +150,13 @@ internal class KicheEndpoint(
         }
 
         try {
-            log("ensureConnected: creating QUIC connection")
             val newConn = KicheConnection.connect(host, scid, localAddr, peerAddr, qConfig)
 
             try {
                 // Drive initial handshake packets (suspend send — no contention during handshake)
-                log("ensureConnected: draining initial handshake packets")
                 drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
 
                 // Handshake loop — no other coroutine accesses newConn yet.
-                log("ensureConnected: entering handshake loop")
                 while (!newConn.isEstablished) {
                     val dgram = socket.receive()
                     val bytes = dgram.packet.readByteArray()
@@ -177,7 +164,6 @@ internal class KicheEndpoint(
                     drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
                 }
 
-                log("ensureConnected: handshake complete")
                 // Create H3 layer
                 val h3Cfg = KicheH3Config()
                 val h3 = try {
@@ -229,28 +215,25 @@ internal class KicheEndpoint(
         myPeer: KicheAddress,
     ) {
         val recvBodyBuf = ByteArray(MAX_DATAGRAM_SIZE)
-        log("eventLoop started")
 
         try {
             while (true) {
-                if (myConn.isClosed) { log("eventLoop: conn.isClosed, breaking"); break }
+                if (myConn.isClosed) break
 
                 // Get quiche timeout + check connection validity under mutex
                 val timeout = mutex.withLock {
-                    if (conn !== myConn) { log("eventLoop: replaced by reconnect, returning"); return }
+                    if (conn !== myConn) return // we've been replaced by a reconnect
                     myConn.timeoutAsMillis().coerceIn(1, 1000)
                 }
 
                 // Wait for UDP datagram or timeout — without holding mutex.
-                log("eventLoop: entering socket.receive() timeout=${timeout}ms")
                 val dgram = withTimeoutOrNull(timeout) {
                     mySocket.receive()
                 }
-                log("eventLoop: socket.receive() returned dgram=${dgram != null}")
 
                 mutex.withLock {
                     if (conn !== myConn) return // replaced by reconnect
-                    if (myConn.isClosed) { log("eventLoop: conn closed inside mutex"); return@withLock }
+                    if (myConn.isClosed) return@withLock
 
                     if (dgram != null) {
                         val bytes = dgram.packet.readByteArray()
@@ -260,21 +243,12 @@ internal class KicheEndpoint(
                     }
 
                     // Drive pending body sends for all active streams
-                    val bodySendsBefore = streams.values.count { !it.bodyFinished }
                     driveBodySendsLocked(myConn, myH3)
-                    val bodySendsAfter = streams.values.count { !it.bodyFinished }
 
                     // Poll and dispatch H3 events
-                    var eventCount = 0
                     while (true) {
                         val event = myH3.poll(quicConn = myConn) ?: break
-                        eventCount++
-                        log("eventLoop: event type=${event.type} stream=${event.streamId}")
                         dispatchEventLocked(event, myConn, myH3, recvBodyBuf)
-                    }
-
-                    if (eventCount > 0 || bodySendsBefore != bodySendsAfter) {
-                        log("eventLoop: events=$eventCount streams=${streams.size} pendingBodies=$bodySendsAfter")
                     }
 
                     // Flush outgoing packets
@@ -282,39 +256,30 @@ internal class KicheEndpoint(
                 }
             }
         } finally {
-            log("eventLoop finally: entering")
             // Fail all pending streams and close our own native objects.
             val cause = IOException("QUIC connection closed")
-            log("eventLoop finally: acquiring mutex")
             val pending = mutex.withLock {
-                log("eventLoop finally: mutex acquired, streams=${streams.size}")
                 val copy = streams.values.toList()
                 streams.clear()
                 // Only null out fields if they still point to our objects
                 if (conn === myConn) {
-                    log("eventLoop finally: nulling fields (conn is ours)")
                     conn = null; h3Conn = null; h3Config = null
                     quicConfig = null; udpSocket = null; eventLoopJob = null
                     peerSocketAddr = null; local = null; peer = null
-                } else {
-                    log("eventLoop finally: fields already replaced by reconnect")
                 }
                 copy
             }
-            log("eventLoop finally: closing native objects")
+            // Always close our own objects (safe even if already closed)
             myH3.close()
             myH3Config.close()
             myConn.close()
             myQConfig.close()
             try { mySocket.close() } catch (_: Throwable) {}
-            log("eventLoop finally: native objects closed, failing ${pending.size} streams")
 
             for (stream in pending) {
                 stream.responseDeferred.completeExceptionally(cause)
             }
-            log("eventLoop finally: calling onDone()")
             onDone()
-            log("eventLoop finally: done")
         }
     }
 
@@ -349,7 +314,6 @@ internal class KicheEndpoint(
             }
 
             KicheH3EventType.Finished -> {
-                log("dispatch: stream ${event.streamId} finished, status=${stream.responseStatus}")
                 streams.remove(event.streamId)
                 completeStream(stream)
             }
@@ -419,14 +383,10 @@ internal class KicheEndpoint(
                     h3, c, stream.streamId, bodyChannel, stream.bodyReadBuf!!,
                     stream.pendingBody, stream.pendingOffset,
                 )
-                if (result.finished && !stream.bodyFinished) {
-                    log("driveBody: stream ${stream.streamId} body finished")
-                }
                 stream.bodyFinished = result.finished
                 stream.pendingBody = result.pending
                 stream.pendingOffset = result.offset
             } catch (e: Throwable) {
-                log("driveBody: stream ${stream.streamId} error: ${e.message}")
                 // Body send failed (e.g. writer exception) — fail this stream only
                 iterator.remove()
                 stream.responseDeferred.completeExceptionally(e)
@@ -475,14 +435,11 @@ internal class KicheEndpoint(
      * (e.g., the selector manager).
      */
     fun close(): Job {
-        log("endpoint.close() enter, socket=${udpSocket != null}")
         // Close the socket to interrupt socket.receive() immediately.
         // Coroutine cancellation alone isn't reliable — the selector may not wake
         // up promptly. Closing the socket forces an immediate exception.
         try { udpSocket?.close() } catch (_: Throwable) {}
-        log("endpoint.close() socket closed, cancelling job")
         coroutineContext.job.cancel()
-        log("endpoint.close() job cancelled")
         return coroutineContext.job
     }
 
