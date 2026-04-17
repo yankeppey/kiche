@@ -13,6 +13,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.io.*
 import kotlin.random.Random
 
+private fun slog(msg: String) {
+    val t = System.currentTimeMillis() % 100_000
+    val thread = Thread.currentThread().name.takeLast(30)
+    println("[KICHE-SRV $t $thread] $msg")
+}
+
 /**
  * Ktor server engine that serves HTTP/3 over QUIC using Cloudflare quiche.
  *
@@ -177,6 +183,9 @@ public class KicheApplicationEngine(
                     // Timeout — drive QUIC timers
                     mutex.withLock {
                         conn?.onTimeout()
+                        if (requests.isNotEmpty()) {
+                            slog("timeout path: ${requests.size} pending requests (streams: ${requests.keys})")
+                        }
                         sendSignal.trySend(Unit)
                     }
                     continue
@@ -233,6 +242,12 @@ public class KicheApplicationEngine(
                     if (h3 != null) {
                         pollAndDispatch(h3, c, udpSocket, peerAddr, mutex, connScope!!)
                     }
+
+                    // Flush outgoing packets (flow control updates, ACKs) immediately.
+                    // Without this, recvBody() queues MAX_STREAM_DATA frames in quiche's
+                    // output buffer but they aren't sent until the send coroutine runs,
+                    // which starves the client's flow control window on large bodies.
+                    drainSend(c, sendBuf, udpSocket, peerAddr)
 
                     sendSignal.trySend(Unit)
 
@@ -293,11 +308,13 @@ public class KicheApplicationEngine(
                         state.headers.add(name to value)
                     }
                     requests[event.streamId] = state
+                    slog("Headers stream=${event.streamId} ${state.method} ${state.path}")
                 }
 
                 KicheH3EventType.Data -> {
                     val bodyBuf = ByteArray(65535)
                     val state = requests[event.streamId] ?: continue
+                    var totalRead = 0
                     while (true) {
                         val n = try {
                             h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
@@ -306,15 +323,22 @@ public class KicheApplicationEngine(
                         }
                         if (n <= 0) break
                         state.bodyParts.add(bodyBuf.copyOf(n))
+                        totalRead += n
                     }
+                    val totalBody = state.bodyParts.sumOf { it.size }
+                    slog("Data stream=${event.streamId} read=$totalRead totalBody=$totalBody")
                 }
 
                 KicheH3EventType.Finished -> {
                     val state = requests.remove(event.streamId) ?: continue
+                    val bodySize = state.bodyParts.sumOf { it.size }
+                    slog("Finished stream=${event.streamId} bodySize=$bodySize → handleH3Request")
                     handleH3Request(h3, conn, event.streamId, state, udpSocket, peerSocketAddr, mutex, connScope)
                 }
 
-                else -> {}
+                else -> {
+                    slog("Other event type=${event.type} stream=${event.streamId}")
+                }
             }
         }
     }
@@ -385,6 +409,7 @@ public class KicheApplicationEngine(
             // Between attempts we yield so the recv loop can process ACKs
             // (which opens the QUIC flow control window for more data).
             if (hasBody) {
+                slog("sendBody: stream=$streamId bodySize=${responseBody.size}")
                 var offset = 0
                 while (offset < responseBody.size && !conn.isClosed) {
                     mutex.withLock {
@@ -399,6 +424,7 @@ public class KicheApplicationEngine(
                     }
                     if (offset < responseBody.size) yield()
                 }
+                slog("sendBody: stream=$streamId complete offset=$offset")
             }
         }
     }

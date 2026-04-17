@@ -11,6 +11,12 @@ import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlin.coroutines.CoroutineContext
 
+private fun log(msg: String) {
+    val t = System.currentTimeMillis() % 100_000
+    val thread = Thread.currentThread().name.takeLast(30)
+    println("[KICHE $t $thread] $msg")
+}
+
 /**
  * Ktor HTTP client engine backed by Cloudflare quiche (QUIC + HTTP/3).
  *
@@ -46,9 +52,13 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         @OptIn(DelicateCoroutinesApi::class)
         GlobalScope.launch(parentContext, start = CoroutineStart.ATOMIC) {
             try {
+                log("engine: deferred selector closure waiting for requestJob")
                 requestJob.join()
+                log("engine: requestJob completed")
             } finally {
+                log("engine: closing selector")
                 selector.close()
+                log("engine: selector closed")
             }
         }
     }
@@ -72,13 +82,19 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
             )
         }
 
+        log("engine.execute: ${data.method.value} ${data.url} → endpoint $endpointId")
         return endpoint.execute(data, callContext, requestTime)
     }
 
     override fun close() {
+        log("engine.close() enter, endpoints=${endpoints.size}")
         super.close()
-        endpoints.forEach { (_, endpoint) -> endpoint.close() }
-        // Completing requestsJob triggers the deferred selector closure set up in init.
+        endpoints.forEach { (id, endpoint) ->
+            log("engine.close() closing endpoint $id")
+            endpoint.close()
+        }
+        log("engine.close() completing requestsJob")
         (requestsJob[Job] as CompletableJob).complete()
+        log("engine.close() done")
     }
 }
