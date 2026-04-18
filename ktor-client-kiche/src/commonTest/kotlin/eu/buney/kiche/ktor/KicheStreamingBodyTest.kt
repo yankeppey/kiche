@@ -235,4 +235,46 @@ class KicheStreamingBodyTest {
     }
 
     //endregion
+
+    //region Error propagation
+
+    @Test
+    fun `WriteChannelContent exception propagates to caller`(): Unit = runBlocking {
+        val error = assertFails {
+            client.post("$testUrl/echo-body") {
+                setBody(object : OutgoingContent.WriteChannelContent() {
+                    override val contentType = ContentType.Application.OctetStream
+                    override suspend fun writeTo(channel: ByteWriteChannel) {
+                        channel.writeStringUtf8("partial data")
+                        channel.flush()
+                        throw IllegalStateException("writer failed")
+                    }
+                })
+            }
+        }
+
+        val cause = generateSequence(error) { it.cause }
+            .firstOrNull { it is IllegalStateException && it.message == "writer failed" }
+        assertNotNull(cause, "Expected 'writer failed' in cause chain, got: $error")
+    }
+
+    @Test
+    fun `WriteChannelContent exception propagates even with no data written`(): Unit = runBlocking {
+        val error = assertFails {
+            client.post("$testUrl/echo-body") {
+                setBody(object : OutgoingContent.WriteChannelContent() {
+                    override val contentType = ContentType.Application.OctetStream
+                    override suspend fun writeTo(channel: ByteWriteChannel) {
+                        throw IllegalStateException("immediate failure")
+                    }
+                })
+            }
+        }
+
+        val cause = generateSequence(error) { it.cause }
+            .firstOrNull { it is IllegalStateException && it.message == "immediate failure" }
+        assertNotNull(cause, "Expected 'immediate failure' in cause chain, got: $error")
+    }
+
+    //endregion
 }

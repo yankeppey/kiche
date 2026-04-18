@@ -281,11 +281,14 @@ private suspend fun trySendBodyData(
     pendingBody: ByteArray?,
     pendingOffset: Int,
 ): BodySendResult {
+    // If the writer coroutine failed, propagate immediately — don't send partial data.
+    bodyChannel.closedCause?.let { throw it }
+
     var curPending = pendingBody
     var curOffset = pendingOffset
 
     // availableForRead can throw if the channel was closed with an error (e.g. writer exception).
-    // In that case, treat it as channel closed with 0 bytes available.
+    // The closedCause check above should catch this, but guard defensively.
     val available = try {
         bodyChannel.availableForRead
     } catch (_: Throwable) {
