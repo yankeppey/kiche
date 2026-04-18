@@ -223,7 +223,12 @@ internal class KicheWebTransportSession(
 
                     // Poll H3 events
                     while (true) {
-                        val event = h3Conn.poll(conn) ?: break
+                        val event = try {
+                            h3Conn.poll(conn) ?: break
+                        } catch (e: KicheH3Exception) {
+                            if (e.isRetryable) break
+                            throw e
+                        }
                         dispatchEventLocked(event, recvBuf)
                     }
 
@@ -284,7 +289,10 @@ internal class KicheWebTransportSession(
                     while (true) {
                         val n = try {
                             h3Conn.recvBody(conn, event.streamId, recvBuf)
-                        } catch (_: KicheH3Exception) { break }
+                        } catch (e: KicheH3Exception) {
+                            if (e.isRetryable) break
+                            throw e
+                        }
                         if (n <= 0) break
                         connectStreamBody.add(recvBuf.copyOf(n))
                     }
@@ -340,7 +348,10 @@ internal class KicheWebTransportSession(
         while (true) {
             val n = try {
                 h3Conn.recvBody(conn, streamId, buf)
-            } catch (_: KicheH3Exception) { break }
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) break
+                throw e
+            }
             if (n <= 0) break
             stream.onDataReceived(buf.copyOf(n))
         }
@@ -362,7 +373,10 @@ internal class KicheWebTransportSession(
         while (true) {
             val n = try {
                 h3Conn.recvBody(conn, streamId, buf)
-            } catch (_: KicheH3Exception) { break }
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) break
+                throw e
+            }
             if (n <= 0) break
             stream.onDataReceived(buf.copyOf(n))
         }

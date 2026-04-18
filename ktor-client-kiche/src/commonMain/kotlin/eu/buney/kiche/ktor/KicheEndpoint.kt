@@ -295,7 +295,12 @@ internal class KicheEndpoint(
                     // Poll and dispatch H3 events
                     var eventCount = 0
                     while (true) {
-                        val event = myH3.poll(quicConn = myConn) ?: break
+                        val event = try {
+                            myH3.poll(quicConn = myConn) ?: break
+                        } catch (e: KicheH3Exception) {
+                            if (e.isRetryable) break
+                            throw e
+                        }
                         eventCount++
                         log("eventLoop: event type=${event.type} stream=${event.streamId}")
                         dispatchEventLocked(event, myConn, myH3, recvBodyBuf)
@@ -368,8 +373,9 @@ internal class KicheEndpoint(
                 while (true) {
                     val n = try {
                         h3.recvBody(quicConn = c, streamId = event.streamId, buf = recvBodyBuf)
-                    } catch (_: KicheH3Exception) {
-                        break
+                    } catch (e: KicheH3Exception) {
+                        if (e.isRetryable) break
+                        throw e
                     }
                     if (n <= 0) break
                     stream.responseBodyParts.add(recvBodyBuf.copyOf(n))
@@ -716,21 +722,14 @@ private suspend fun trySendBodyData(
         if (curPending == null && bodyChannel.isClosedForRead) {
             bodyChannel.closedCause?.let { throw it }
             // Send an empty DATA frame with FIN to close the H3 stream.
-            // quiche's H3 send_body may return Done when stream capacity is
-            // temporarily exhausted (no room for the 2-byte DATA frame header).
-            // In that case, retry on the next event loop iteration — once the
-            // peer ACKs and the flow control window opens, send_body will succeed.
             // Do NOT fall back to raw conn.streamSend() for FIN — bypassing the
             // H3 layer sets FIN at an offset that the peer's H3 layer rejects
             // as a FINAL_SIZE protocol error.
-            val rc = try {
+            try {
                 h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
             } catch (e: KicheH3Exception) {
-                if (e.isRetryable) -1 else throw e
-            }
-            if (rc < 0) {
-                // H3 couldn't send yet — retry next iteration after ACKs arrive.
-                return BodySendResult(finished = false, pending = null, offset = 0)
+                if (e.isRetryable) return BodySendResult(finished = false, pending = null, offset = 0)
+                throw e
             }
             return BodySendResult(finished = true, pending = null, offset = 0)
         }

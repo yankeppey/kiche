@@ -264,7 +264,7 @@ internal class ServerStreamState(
             val sent = try {
                 h3Conn.sendBody(conn, streamId, chunk, false)
             } catch (e: KicheH3Exception) {
-                if (e.isRetryable) 0 else return
+                if (e.isRetryable) 0 else { incomingData.close(e); return }
             }
 
             if (sent > 0) {
@@ -288,6 +288,7 @@ internal class ServerStreamState(
                         pendingWriteOffset = 0
                         break
                     }
+                    incomingData.close(e)
                     return
                 }
                 if (sent < data.size) {
@@ -304,7 +305,10 @@ internal class ServerStreamState(
             try {
                 h3Conn.sendBody(conn, streamId, ByteArray(0), true)
                 finSent = true
-            } catch (_: KicheH3Exception) { }
+            } catch (e: KicheH3Exception) {
+                if (!e.isRetryable) incomingData.close(e)
+                // Retryable: will retry on next driveWriteLocked() call
+            }
         }
     }
 

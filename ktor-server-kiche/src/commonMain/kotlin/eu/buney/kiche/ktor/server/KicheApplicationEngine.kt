@@ -319,7 +319,12 @@ public class KicheApplicationEngine(
         connScope: CoroutineScope,
     ) {
         while (true) {
-            val event = h3.poll(quicConn = conn) ?: break
+            val event = try {
+                h3.poll(quicConn = conn) ?: break
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) break
+                throw e
+            }
 
             when (event.type) {
                 KicheH3EventType.Headers -> {
@@ -376,7 +381,10 @@ public class KicheApplicationEngine(
                         while (true) {
                             val n = try {
                                 h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
-                            } catch (_: KicheH3Exception) { break }
+                            } catch (e: KicheH3Exception) {
+                                if (e.isRetryable) break
+                                throw e
+                            }
                             if (n <= 0) break
                             wtSession.onDatagram(bodyBuf.copyOf(n))
                         }
@@ -390,7 +398,10 @@ public class KicheApplicationEngine(
                         while (true) {
                             val n = try {
                                 h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
-                            } catch (_: KicheH3Exception) { break }
+                            } catch (e: KicheH3Exception) {
+                                if (e.isRetryable) break
+                                throw e
+                            }
                             if (n <= 0) break
                             wtSubSession.onStreamData(event.streamId, bodyBuf.copyOf(n))
                         }
@@ -403,8 +414,9 @@ public class KicheApplicationEngine(
                     while (true) {
                         val n = try {
                             h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
-                        } catch (_: KicheH3Exception) {
-                            break
+                        } catch (e: KicheH3Exception) {
+                            if (e.isRetryable) break
+                            throw e
                         }
                         if (n <= 0) break
                         state.bodyParts.add(bodyBuf.copyOf(n))
@@ -684,8 +696,8 @@ public class KicheApplicationEngine(
                             headers = responseHeaders, fin = !hasBody,
                         )
                         headersSent = true
-                    } catch (_: KicheH3Exception) {
-                        // StreamBlocked or other retryable H3 error — retry after yield
+                    } catch (e: KicheH3Exception) {
+                        if (!e.isRetryable) throw e
                     }
                     drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
                 }
@@ -703,7 +715,8 @@ public class KicheApplicationEngine(
                         val chunk = responseBody.copyOfRange(offset, responseBody.size)
                         val sent = try {
                             h3.sendBody(quicConn = conn, streamId = streamId, body = chunk, fin = true)
-                        } catch (_: KicheH3Exception) {
+                        } catch (e: KicheH3Exception) {
+                            if (!e.isRetryable) throw e
                             0
                         }
                         if (sent > 0) offset += sent

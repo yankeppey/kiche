@@ -138,7 +138,7 @@ internal class KicheWebTransportStreamImpl(
             val sent = try {
                 h3Conn.sendBody(conn, id, chunk, false)
             } catch (e: KicheH3Exception) {
-                if (e.isRetryable) 0 else return
+                if (e.isRetryable) 0 else { closeChannels(); return }
             }
 
             if (sent > 0) {
@@ -162,6 +162,7 @@ internal class KicheWebTransportStreamImpl(
                         pendingWriteOffset = 0
                         break
                     }
+                    closeChannels()
                     return
                 }
                 if (sent < data.size) {
@@ -181,7 +182,10 @@ internal class KicheWebTransportStreamImpl(
             try {
                 h3Conn.sendBody(conn, id, ByteArray(0), true)
                 finSent = true
-            } catch (_: KicheH3Exception) { }
+            } catch (e: KicheH3Exception) {
+                if (!e.isRetryable) closeChannels()
+                // Retryable: will retry on next driveWriteLocked() call
+            }
         }
     }
 }
