@@ -152,6 +152,7 @@ public class KicheApplicationEngine(
         var h3Config: KicheH3Config? = null
         var connPeerPort = -1
         var connPeerSocketAddr: InetSocketAddress? = null // kept for drainSend (avoids ip→string round-trip)
+        var connScope: CoroutineScope? = null // per-connection scope for response coroutines
         val pendingResponses = mutableListOf<PendingResponse>()
 
         val sendBuf = ByteArray(65535)
@@ -196,8 +197,9 @@ public class KicheApplicationEngine(
                     // New client from different port → reset
                     conn?.let { c ->
                         if (fromPort != connPeerPort) {
-                            // Wait for any in-flight response coroutines before freeing native objects
-                            joinResponseJobs()
+                            // Cancel in-flight response coroutines before freeing native objects
+                            connScope?.coroutineContext?.job?.cancelAndJoin()
+                            connScope = null
                             h3Conn?.close()
                             c.close()
                             h3Config?.close()
@@ -213,6 +215,9 @@ public class KicheApplicationEngine(
                     if (conn == null) {
                         connPeerPort = fromPort
                         connPeerSocketAddr = peerAddr
+                        connScope = CoroutineScope(
+                            scope.coroutineContext + SupervisorJob(scope.coroutineContext.job)
+                        )
                         val scid = Random.nextBytes(16)
                         conn = KicheConnection.accept(
                             scid = scid, odcid = null,
@@ -232,14 +237,15 @@ public class KicheApplicationEngine(
                     // Poll H3 events and dispatch to Ktor pipeline
                     val h3 = h3Conn
                     if (h3 != null) {
-                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket, peerAddr, mutex)
+                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket, peerAddr, mutex, connScope!!)
                     }
 
                     sendSignal.trySend(Unit)
 
                     // Connection closed → cleanup
                     if (c.isClosed) {
-                        joinResponseJobs()
+                        connScope?.coroutineContext?.job?.cancelAndJoin()
+                        connScope = null
                         h3Conn?.close()
                         c.close()
                         h3Config?.close()
@@ -253,6 +259,7 @@ public class KicheApplicationEngine(
             }
         } finally {
             sendJob.cancel()
+            connScope?.coroutineContext?.job?.cancelAndJoin()
             h3Conn?.close()
             conn?.close()
             h3Config?.close()
@@ -276,18 +283,6 @@ public class KicheApplicationEngine(
 
     private val requests = mutableMapOf<Long, RequestState>()
 
-    /** Outstanding response coroutines that hold references to the current h3/conn objects. */
-    private val responseJobs = mutableListOf<Job>()
-
-    /**
-     * Waits for all in-flight response coroutines to complete before freeing native objects.
-     * Must be called BEFORE closing h3Conn/conn to avoid use-after-free.
-     */
-    private suspend fun joinResponseJobs() {
-        responseJobs.forEach { it.join() }
-        responseJobs.clear()
-    }
-
     private fun pollAndDispatch(
         h3: KicheH3Connection,
         conn: KicheConnection,
@@ -297,6 +292,7 @@ public class KicheApplicationEngine(
         udpSocket: BoundDatagramSocket,
         peerSocketAddr: InetSocketAddress,
         mutex: Mutex,
+        connScope: CoroutineScope,
     ) {
         while (true) {
             val event = h3.poll(quicConn = conn) ?: break
@@ -332,7 +328,7 @@ public class KicheApplicationEngine(
 
                 KicheH3EventType.Finished -> {
                     val state = requests.remove(event.streamId) ?: continue
-                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses, udpSocket, peerSocketAddr, mutex)
+                    handleH3Request(h3, conn, event.streamId, state, udpSocket, peerSocketAddr, mutex, connScope)
                 }
 
                 else -> {}
@@ -345,12 +341,10 @@ public class KicheApplicationEngine(
         conn: KicheConnection,
         streamId: Long,
         request: RequestState,
-        remoteAddr: KicheAddress,
-        localAddr: KicheAddress,
-        pendingResponses: MutableList<PendingResponse>,
         udpSocket: BoundDatagramSocket,
         peerSocketAddr: InetSocketAddress,
         mutex: Mutex,
+        connScope: CoroutineScope,
     ) {
         val application = applicationProvider()
 
@@ -376,7 +370,7 @@ public class KicheApplicationEngine(
             localAddress = localSocketAddr,
         )
 
-        val job = scope.launch {
+        connScope.launch {
             try {
                 pipeline.execute(call, Unit)
             } catch (e: Throwable) {
@@ -424,8 +418,6 @@ public class KicheApplicationEngine(
                 }
             }
         }
-        responseJobs.add(job)
-        job.invokeOnCompletion { responseJobs.remove(job) }
     }
 
     private companion object {
