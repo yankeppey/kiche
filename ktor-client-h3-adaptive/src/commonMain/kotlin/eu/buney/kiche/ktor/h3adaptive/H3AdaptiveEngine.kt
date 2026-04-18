@@ -24,13 +24,13 @@ public class H3AdaptiveEngine(
     override val config: H3AdaptiveEngineConfig,
 ) : HttpClientEngineBase("h3-adaptive") {
 
-    private val tcpEngine: HttpClientEngine = requireNotNull(config.tcpEngineFactory) {
+    private val tcpEngine: HttpClientEngine = requireNotNull(config.tcpEngineCreator) {
         "TCP engine must be configured via H3AdaptiveEngineConfig.tcp()"
-    }.createWithConfig(config.tcpConfigBlock)
+    }.invoke()
 
-    private val quicEngine: HttpClientEngine = requireNotNull(config.quicEngineFactory) {
+    private val quicEngine: HttpClientEngine = requireNotNull(config.quicEngineCreator) {
         "QUIC engine must be configured via H3AdaptiveEngineConfig.quic()"
-    }.createWithConfig(config.quicConfigBlock)
+    }.invoke()
 
     private val originStates = mutableMapOf<String, OriginState>()
     private val originStatesMutex = Mutex()
@@ -132,7 +132,3 @@ public class H3AdaptiveEngine(
         const val ALT_SVC_HEADER = "Alt-Svc"
     }
 }
-
-private fun HttpClientEngineFactory<*>.createWithConfig(
-    block: HttpClientEngineConfig.() -> Unit,
-): HttpClientEngine = create(block)
