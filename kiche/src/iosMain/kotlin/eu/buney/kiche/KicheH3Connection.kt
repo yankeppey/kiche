@@ -22,8 +22,7 @@ actual class KicheH3Connection actual constructor(
         if (streamId < 0) return null
 
         val evPtr = ev.value ?: return null
-        @Suppress("USELESS_CAST")
-        val rawType = quiche_h3_event_type(evPtr) as UInt
+        val rawType = quiche_h3_event_type(evPtr).value
         val eventType = KicheH3EventType.fromValue(rawType.toInt()) ?: run {
             quiche_h3_event_free(evPtr)
             return null
