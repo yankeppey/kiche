@@ -5,15 +5,22 @@ plugins {
 kotlin {
     jvmToolchain(17)
     jvm()
+    iosArm64()
+    iosSimulatorArm64()
+
+    applyDefaultHierarchyTemplate()
 
     sourceSets {
-        jvmMain.dependencies {
+        commonMain.dependencies {
             api(project(":kiche"))
             api(libs.ktor.client.core)
+            api(libs.ktor.network)
             implementation(libs.kotlinx.coroutines.core)
         }
-        jvmTest.dependencies {
+        commonTest.dependencies {
             implementation(libs.kotlin.test)
+        }
+        jvmTest.dependencies {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.slf4j.simple)
             implementation(project(":ktor-server-kiche"))

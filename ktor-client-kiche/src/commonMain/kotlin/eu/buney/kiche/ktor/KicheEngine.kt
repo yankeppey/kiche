@@ -6,17 +6,17 @@ import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.http.content.*
+import io.ktor.network.selector.*
+import io.ktor.network.sockets.*
 import io.ktor.util.*
 import io.ktor.util.date.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
-import java.net.InetAddress
-import java.net.DatagramSocket
-import java.net.InetSocketAddress
-import java.security.SecureRandom
+import kotlinx.io.*
 import kotlin.coroutines.CoroutineContext
+import kotlin.random.Random
 
-@OptIn(InternalAPI::class)
+@OptIn(InternalAPI::class, ExperimentalCoroutinesApi::class)
 public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEngineBase("ktor-kiche") {
 
     override val supportedCapabilities: Set<HttpClientEngineCapability<*>> =
@@ -25,6 +25,11 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
     private val requestsJob: CoroutineContext
 
     override val coroutineContext: CoroutineContext
+
+    private val selectorManager = SelectorManager(Dispatchers.Default)
+
+    /** Single-threaded dispatcher for all quiche connection access (not thread-safe). */
+    private val quicheDispatcher = Dispatchers.Default.limitedParallelism(1)
 
     init {
         val parent = super.coroutineContext.job
@@ -39,20 +44,22 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         val host = data.url.host
         val port = data.url.port.takeIf { it != 0 } ?: DEFAULT_HTTPS_PORT
 
-        // Resolve server address
-        val serverAddr = InetAddress.getByName(host)
-        val serverBytes = serverAddr.address
-        val peer = KicheAddress(serverBytes, port)
+        // Bind a UDP socket via ktor-network
+        val udpSocket = aSocket(selectorManager).udp().bind(InetSocketAddress("0.0.0.0", 0))
+        val localSocketAddr = udpSocket.localAddress as InetSocketAddress
+        val local = KicheAddress(
+            ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
+            port = localSocketAddr.port,
+        )
 
-        // Bind a UDP socket to get a local address
-        val udpSocket = DatagramSocket()
-        udpSocket.connect(InetSocketAddress(serverAddr, port))
-        val localAddr = udpSocket.localAddress.address ?: byteArrayOf(0, 0, 0, 0)
-        val localPort = udpSocket.localPort
-        val local = KicheAddress(localAddr, localPort)
+        val peerSocketAddr = InetSocketAddress(host, port)
+        // Resolve the peer address to raw bytes for quiche
+        val peerIp = peerSocketAddr.resolveAddress()
+            ?: error("Failed to resolve address for $host")
+        val peer = KicheAddress(ip = peerIp, port = port)
 
         // Generate random SCID
-        val scid = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val scid = Random.nextBytes(16)
 
         val quicConfig = KicheConfig().apply {
             setApplicationProtos(H3_ALPN)
@@ -71,8 +78,9 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         try {
             val conn = KicheConnection.connect(host, scid, local, peer, quicConfig)
             try {
-                // QUIC handshake + HTTP/3 request/response
-                val responseData = executeH3Request(conn, udpSocket, local, peer, data, callContext, requestTime)
+                val responseData = executeH3Request(
+                    conn, udpSocket, peerSocketAddr, local, peer, data, callContext, requestTime,
+                )
                 return responseData
             } finally {
                 conn.close()
@@ -85,24 +93,25 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
 
     private suspend fun executeH3Request(
         conn: KicheConnection,
-        udpSocket: DatagramSocket,
+        udpSocket: BoundDatagramSocket,
+        peerSocketAddr: InetSocketAddress,
         local: KicheAddress,
         peer: KicheAddress,
         data: HttpRequestData,
         callContext: CoroutineContext,
         requestTime: GMTDate,
-    ): HttpResponseData = withContext(Dispatchers.IO) {
+    ): HttpResponseData = withContext(quicheDispatcher) {
         val sendBuf = ByteArray(MAX_DATAGRAM_SIZE)
-        val recvBuf = ByteArray(MAX_DATAGRAM_SIZE)
 
         // Drive initial QUIC handshake packets
-        drainSend(conn, sendBuf, udpSocket)
+        drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
 
         // Handshake loop
         while (!conn.isEstablished) {
-            val len = udpSocket.receivePacket(recvBuf)
-            conn.recv(recvBuf, len, peer, local)
-            drainSend(conn, sendBuf, udpSocket)
+            val dgram = udpSocket.receive()
+            val bytes = dgram.packet.readByteArray()
+            conn.recv(buf = bytes, len = bytes.size, from = peer, to = local)
+            drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
         }
 
         // Create H3 connection
@@ -123,14 +132,14 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                     is OutgoingContent.NoContent -> ByteArray(0)
                     else -> error("Unsupported request body type: ${body::class.simpleName}. Only ByteArrayContent is supported.")
                 }
-                if (bodyBytes.isNotEmpty()) {
-                    h3Conn.sendBody(quicConn = conn, streamId = streamId, body = bodyBytes, fin = true)
-                } else {
-                    h3Conn.sendBody(quicConn = conn, streamId = streamId, body = ByteArray(0), fin = true)
-                }
+                h3Conn.sendBody(
+                    quicConn = conn, streamId = streamId,
+                    body = if (bodyBytes.isNotEmpty()) bodyBytes else ByteArray(0),
+                    fin = true,
+                )
             }
 
-            drainSend(conn, sendBuf, udpSocket)
+            drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
 
             // Poll for response
             var responseHeaders: Headers = Headers.Empty
@@ -139,22 +148,22 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
             var finished = false
 
             while (!finished && !conn.isClosed) {
-                // Receive packets from network
-                if (udpSocket.soTimeout == 0) {
-                    val timeout = conn.timeoutAsMillis()
-                    udpSocket.soTimeout = if (timeout > 0) timeout.toInt().coerceAtMost(1000) else 1000
+                // Receive packets with timeout
+                val dgram = withTimeoutOrNull(
+                    conn.timeoutAsMillis().coerceIn(1, 1000)
+                ) {
+                    udpSocket.receive()
                 }
 
-                val len = try {
-                    udpSocket.receivePacket(recvBuf)
-                } catch (_: java.net.SocketTimeoutException) {
+                if (dgram == null) {
                     conn.onTimeout()
-                    drainSend(conn, sendBuf, udpSocket)
+                    drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
                     continue
                 }
 
-                conn.recv(recvBuf, len, peer, local)
-                drainSend(conn, sendBuf, udpSocket)
+                val bytes = dgram.packet.readByteArray()
+                conn.recv(buf = bytes, len = bytes.size, from = peer, to = local)
+                drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
 
                 // Poll H3 events
                 while (true) {
@@ -218,6 +227,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
 
     override fun close() {
         super.close()
+        selectorManager.close()
         (requestsJob[Job] as CompletableJob).complete()
     }
 
@@ -281,26 +291,17 @@ private fun parseResponseHeaders(h3Headers: List<KicheH3Header>): Pair<HttpStatu
 }
 
 /**
- * Drain all pending QUIC packets from the connection and send them over the UDP socket.
+ * Drain all pending QUIC packets and send them via the ktor-network UDP socket.
  */
-private fun drainSend(conn: KicheConnection, buf: ByteArray, socket: DatagramSocket) {
+private suspend fun drainSend(
+    conn: KicheConnection,
+    buf: ByteArray,
+    socket: BoundDatagramSocket,
+    peerAddr: InetSocketAddress,
+) {
     while (true) {
         val sendResult = conn.send(buf, buf.size) ?: break
-        val packet = java.net.DatagramPacket(
-            buf, 0, sendResult.written,
-            InetAddress.getByAddress(sendResult.to.ip),
-            sendResult.to.port,
-        )
-        socket.send(packet)
+        val packet = Buffer().apply { write(buf, 0, sendResult.written) }
+        socket.send(Datagram(packet, peerAddr))
     }
 }
-
-/**
- * Receive a single UDP packet, returning the number of bytes read.
- */
-private fun DatagramSocket.receivePacket(buf: ByteArray): Int {
-    val packet = java.net.DatagramPacket(buf, buf.size)
-    receive(packet)
-    return packet.length
-}
-

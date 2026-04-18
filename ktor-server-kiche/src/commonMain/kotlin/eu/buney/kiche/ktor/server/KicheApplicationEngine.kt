@@ -2,22 +2,22 @@ package eu.buney.kiche.ktor.server
 
 import eu.buney.kiche.*
 import io.ktor.events.*
+import io.ktor.network.selector.*
+import io.ktor.network.sockets.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.security.SecureRandom
+import kotlinx.io.*
+import kotlin.random.Random
 
 /**
  * Ktor server engine that serves HTTP/3 over QUIC using Cloudflare quiche.
  *
  * Architecture (modeled after Ktor CIO server):
- * - Binds a UDP socket on the configured host:port
+ * - Binds a UDP socket on the configured host:port via ktor-network
  * - Accepts QUIC connections and creates H3 sessions
  * - For each H3 request, creates a [KicheApplicationCall] and executes the Ktor pipeline
  * - Separate recv/send coroutines handle QUIC packet I/O with flow control
@@ -66,8 +66,9 @@ public class KicheApplicationEngine(
     }
 
     private val serverJob = CompletableDeferred<Unit>()
+    private val selectorManager = SelectorManager(Dispatchers.Default)
     private val scope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO + CoroutineName("kiche-server")
+        SupervisorJob() + Dispatchers.Default + CoroutineName("kiche-server")
     )
 
     override fun start(wait: Boolean): ApplicationEngine {
@@ -82,6 +83,7 @@ public class KicheApplicationEngine(
 
     override fun stop(gracePeriodMillis: Long, timeoutMillis: Long) {
         scope.cancel()
+        selectorManager.close()
     }
 
     private suspend fun serve() {
@@ -109,31 +111,39 @@ public class KicheApplicationEngine(
             setInitialMaxStreamsUni(configuration.initialMaxStreamsUni)
         }
 
-        val socket = DatagramSocket(port, InetAddress.getByName(host))
+        val udpSocket = aSocket(selectorManager).udp().bind(InetSocketAddress(host, port))
+        val boundAddr = udpSocket.localAddress as InetSocketAddress
 
         // Report the actual resolved connector
-        val actualPort = socket.localPort
         resolvedConnectorsDeferred.complete(
             listOf(
                 EngineConnectorBuilder().apply {
                     this.host = host
-                    this.port = actualPort
+                    this.port = boundAddr.port
                 }
             )
+        )
+
+        val localAddr = KicheAddress(
+            ip = boundAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
+            port = boundAddr.port,
         )
 
         monitor.raiseCatching(ServerReady, environment, environment.log)
 
         try {
-            serveLoop(socket, quicConfig)
+            serveLoop(udpSocket, quicConfig, localAddr)
         } finally {
             quicConfig.close()
-            socket.close()
+            udpSocket.close()
         }
     }
 
-    private suspend fun serveLoop(socket: DatagramSocket, quicConfig: KicheConfig) {
-        socket.soTimeout = 50
+    private suspend fun serveLoop(
+        udpSocket: BoundDatagramSocket,
+        quicConfig: KicheConfig,
+        localAddr: KicheAddress,
+    ) {
         val mutex = Mutex()
         val sendSignal = Channel<Unit>(Channel.CONFLATED)
 
@@ -143,14 +153,10 @@ public class KicheApplicationEngine(
         var connPeerPort = -1
         val pendingResponses = mutableListOf<PendingResponse>()
 
-        val localAddr = KicheAddress(
-            InetAddress.getByName(socket.localAddress.hostAddress).address,
-            socket.localPort,
-        )
+        val sendBuf = ByteArray(65535)
 
         // Send coroutine: drains outgoing QUIC packets and drives pending response bodies
         val sendJob = scope.launch {
-            val sendBuf = ByteArray(65535)
             while (isActive) {
                 withTimeoutOrNull(10) { sendSignal.receive() }
                 mutex.withLock {
@@ -159,20 +165,18 @@ public class KicheApplicationEngine(
                     if (h3 != null) {
                         drivePendingResponses(h3, c, pendingResponses)
                     }
-                    drainSend(c, sendBuf, socket)
+                    drainSend(c, sendBuf, udpSocket)
                 }
             }
         }
 
         // Recv loop
-        val recvBuf = ByteArray(65535)
         try {
             while (scope.isActive) {
-                val packet = DatagramPacket(recvBuf, recvBuf.size)
-                val len = try {
-                    socket.receive(packet)
-                    packet.length
-                } catch (_: java.net.SocketTimeoutException) {
+                val dgram = withTimeoutOrNull(50) { udpSocket.receive() }
+
+                if (dgram == null) {
+                    // Timeout — drive QUIC timers
                     mutex.withLock {
                         conn?.onTimeout()
                         sendSignal.trySend(Unit)
@@ -180,8 +184,11 @@ public class KicheApplicationEngine(
                     continue
                 }
 
-                val fromPort = packet.port
-                val from = KicheAddress(packet.address.address, fromPort)
+                val peerAddr = dgram.address as InetSocketAddress
+                val fromPort = peerAddr.port
+                val fromIp = peerAddr.resolveAddress() ?: continue
+                val from = KicheAddress(fromIp, fromPort)
+                val bytes = dgram.packet.readByteArray()
 
                 mutex.withLock {
                     // New client from different port → reset
@@ -200,7 +207,7 @@ public class KicheApplicationEngine(
                     // Accept new connection
                     if (conn == null) {
                         connPeerPort = fromPort
-                        val scid = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                        val scid = Random.nextBytes(16)
                         conn = KicheConnection.accept(
                             scid = scid, odcid = null,
                             local = localAddr, peer = from, config = quicConfig,
@@ -208,7 +215,7 @@ public class KicheApplicationEngine(
                     }
 
                     val c = conn ?: return@withLock
-                    c.recv(buf = recvBuf, len = len, from = from, to = localAddr)
+                    c.recv(buf = bytes, len = bytes.size, from = from, to = localAddr)
 
                     // Create H3 connection once handshake completes
                     if (c.isEstablished && h3Conn == null) {
@@ -219,7 +226,7 @@ public class KicheApplicationEngine(
                     // Poll H3 events and dispatch to Ktor pipeline
                     val h3 = h3Conn
                     if (h3 != null) {
-                        pollAndDispatch(h3, c, from, localAddr, pendingResponses)
+                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket)
                     }
 
                     sendSignal.trySend(Unit)
@@ -267,6 +274,7 @@ public class KicheApplicationEngine(
         remoteAddr: KicheAddress,
         localAddr: KicheAddress,
         pendingResponses: MutableList<PendingResponse>,
+        udpSocket: BoundDatagramSocket,
     ) {
         while (true) {
             val event = h3.poll(quicConn = conn) ?: break
@@ -302,7 +310,7 @@ public class KicheApplicationEngine(
 
                 KicheH3EventType.Finished -> {
                     val state = requests.remove(event.streamId) ?: continue
-                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses)
+                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses, udpSocket)
                 }
 
                 else -> {}
@@ -318,6 +326,7 @@ public class KicheApplicationEngine(
         remoteAddr: KicheAddress,
         localAddr: KicheAddress,
         pendingResponses: MutableList<PendingResponse>,
+        udpSocket: BoundDatagramSocket,
     ) {
         val application = applicationProvider()
 
@@ -340,8 +349,6 @@ public class KicheApplicationEngine(
             localAddress = localAddr,
         )
 
-        // Execute the Ktor pipeline synchronously (within the mutex)
-        // Then send the response via H3
         scope.launch {
             try {
                 pipeline.execute(call, Unit)
@@ -358,31 +365,39 @@ public class KicheApplicationEngine(
             }
 
             val responseBody = responseData.body
+            val sendBuf = ByteArray(65535)
 
-            // Must take the mutex to access quiche connection
-            // (the response is sent from a launched coroutine)
-            synchronized(this@KicheApplicationEngine) {
-                val hasBody = responseBody.isNotEmpty()
-                h3.sendResponse(
-                    quicConn = conn, streamId = streamId,
-                    headers = responseHeaders, fin = !hasBody,
-                )
-                if (hasBody) {
-                    val sent = try {
-                        h3.sendBody(quicConn = conn, streamId = streamId, body = responseBody, fin = true)
-                    } catch (_: KicheException) {
-                        0
-                    }
-                    if (sent < responseBody.size) {
-                        pendingResponses.add(PendingResponse(streamId, responseBody, offset = sent))
-                    }
+            val hasBody = responseBody.isNotEmpty()
+            h3.sendResponse(
+                quicConn = conn, streamId = streamId,
+                headers = responseHeaders, fin = !hasBody,
+            )
+            if (hasBody) {
+                val sent = try {
+                    h3.sendBody(quicConn = conn, streamId = streamId, body = responseBody, fin = true)
+                } catch (_: KicheException) {
+                    0
+                }
+                if (sent < responseBody.size) {
+                    pendingResponses.add(PendingResponse(streamId, responseBody, offset = sent))
                 }
             }
+            drainSend(conn, sendBuf, udpSocket)
         }
     }
 
     private companion object {
         val H3_ALPN: ByteArray = byteArrayOf(2, 'h'.code.toByte(), '3'.code.toByte())
+
+        fun formatIp(ip: ByteArray): String = if (ip.size == 4) {
+            ip.joinToString(".") { (it.toInt() and 0xFF).toString() }
+        } else {
+            // IPv6 — simplified
+            ip.toList().chunked(2).joinToString(":") { (hi, lo) ->
+                val v = ((hi.toInt() and 0xFF) shl 8) or (lo.toInt() and 0xFF)
+                v.toString(16)
+            }
+        }
 
         fun drivePendingResponses(
             h3: KicheH3Connection,
@@ -408,15 +423,12 @@ public class KicheApplicationEngine(
             }
         }
 
-        fun drainSend(conn: KicheConnection, buf: ByteArray, socket: DatagramSocket) {
+        suspend fun drainSend(conn: KicheConnection, buf: ByteArray, socket: BoundDatagramSocket) {
             while (true) {
                 val result = conn.send(buf, buf.size) ?: break
-                val packet = DatagramPacket(
-                    buf, 0, result.written,
-                    InetAddress.getByAddress(result.to.ip),
-                    result.to.port,
-                )
-                socket.send(packet)
+                val packet = Buffer().apply { write(buf, 0, result.written) }
+                val addr = InetSocketAddress(formatIp(result.to.ip), result.to.port)
+                socket.send(Datagram(packet, addr))
             }
         }
     }

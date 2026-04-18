@@ -22,7 +22,7 @@ internal class KicheApplicationCall(
     requestBody: ByteArray,
     remoteAddress: KicheAddress,
     localAddress: KicheAddress,
-    override val coroutineContext: CoroutineContext = Dispatchers.IO,
+    override val coroutineContext: CoroutineContext = Dispatchers.Default,
 ) : BaseApplicationCall(application), CoroutineScope {
 
     override val request: KicheApplicationRequest = KicheApplicationRequest(
@@ -119,7 +119,10 @@ internal class KicheApplicationRequest(
     companion object {
         private fun formatAddress(addr: KicheAddress): String {
             return if (addr.isIpv6) {
-                addr.ip.joinToString(":") { "%02x".format(it) }
+                addr.ip.toList().chunked(2).joinToString(":") { (hi, lo) ->
+                    val v = ((hi.toInt() and 0xFF) shl 8) or (lo.toInt() and 0xFF)
+                    v.toString(16)
+                }
             } else {
                 addr.ip.joinToString(".") { (it.toInt() and 0xFF).toString() }
             }
