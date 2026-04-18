@@ -28,6 +28,57 @@ class TestPipe(
             't'.code.toByte(), 'o'.code.toByte(), '1'.code.toByte()
         )
 
+        /**
+         * Creates a pipe matching quiche's test_utils::Pipe::default_config():
+         * max_data=30, stream_bidi=15, stream_uni=10, max_streams=3.
+         * Useful for tests that need to hit flow control / stream limits.
+         */
+        fun newWithSmallLimits(): TestPipe {
+            val certDir = quicheCertDir()
+
+            val serverConfig = KicheConfig().apply {
+                loadCertChainFromPemFile("$certDir/cert.crt")
+                loadPrivKeyFromPemFile("$certDir/cert.key")
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(30)
+                setInitialMaxStreamDataBidiLocal(15)
+                setInitialMaxStreamDataBidiRemote(15)
+                setInitialMaxStreamDataUni(10)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(3)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+                setAckDelayExponent(8)
+            }
+
+            val clientConfig = KicheConfig().apply {
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(30)
+                setInitialMaxStreamDataBidiLocal(15)
+                setInitialMaxStreamDataBidiRemote(15)
+                setInitialMaxStreamDataUni(10)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(3)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+                setAckDelayExponent(8)
+            }
+
+            val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
+            val serverScid = ByteArray(16) { (it + 0x50).toByte() }
+
+            val client = KicheConnection.connect(
+                serverName = "quic.tech", scid = clientScid,
+                local = CLIENT_ADDR, peer = SERVER_ADDR, config = clientConfig,
+            )
+            val server = KicheConnection.accept(
+                scid = serverScid, odcid = null,
+                local = SERVER_ADDR, peer = CLIENT_ADDR, config = serverConfig,
+            )
+
+            return TestPipe(client, server, clientConfig, serverConfig)
+        }
+
         fun new(
             dgramRecvQueueLen: Long = 100,
             dgramSendQueueLen: Long = 100,

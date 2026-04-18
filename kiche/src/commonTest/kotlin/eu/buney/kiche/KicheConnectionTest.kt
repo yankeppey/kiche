@@ -425,6 +425,45 @@ class KicheConnectionTest {
 
     //endregion
 
+    //region tests.rs:flow_control_limit_send (line 4561)
+
+    /**
+     * Ported from tests.rs:flow_control_limit_send()
+     * With max_data=30 and per-stream bidi limit=15, the client can send 15
+     * bytes on two streams (30 total), but a third stream send returns Done
+     * because the connection-level flow control window is exhausted.
+     *
+     * Note: the Rust test also asserts internal data_blocked_sent/recv counters
+     * which are not exposed via the C API, so those checks are omitted.
+     */
+    @Test
+    fun testFlowControlLimitSend() {
+        TestPipe.newWithSmallLimits().use { pipe ->
+            pipe.handshake()
+
+            // First stream: 15 bytes fills stream 0's per-stream limit
+            assertEquals(15, pipe.client.streamSend(0, ByteArray(15), 15, fin = false))
+            pipe.advance()
+
+            // Second stream: 15 bytes fills stream 4's per-stream limit (30 total = max_data)
+            assertEquals(15, pipe.client.streamSend(4, ByteArray(15), 15, fin = false))
+            pipe.advance()
+
+            // Third stream: connection-level flow control exhausted → Done (-1)
+            assertEquals(-1, pipe.client.streamSend(8, ByteArray(1), 1, fin = false))
+            pipe.advance()
+
+            // Server should have received data on exactly two streams
+            val s1 = pipe.server.streamReadableNext()
+            assertTrue(s1 >= 0, "first stream should be readable")
+            val s2 = pipe.server.streamReadableNext()
+            assertTrue(s2 >= 0, "second stream should be readable")
+            assertEquals(-1, pipe.server.streamReadableNext())
+        }
+    }
+
+    //endregion
+
     //region tests.rs:local_error (line 8940)
 
     /**
