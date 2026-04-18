@@ -14,6 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -588,6 +589,472 @@ class KicheConnectionTest {
             assertNotNull(err)
             assertTrue(err.isApp)
             assertEquals(0x1234, err.errorCode)
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:handshake_resumption (line 544)
+
+    /**
+     * Ported from tests.rs:handshake_resumption()
+     * Performs an initial handshake, extracts the TLS session ticket,
+     * then verifies a second connection using the saved session resumes.
+     */
+    @Test
+    fun testHandshakeResumption() {
+        val certDir = quicheCertDir()
+        val ticketKey = ByteArray(48) { 0x0a }
+
+        // First handshake — establish and extract session.
+        val serverConfig1 = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamsBidi(3)
+            setMaxIdleTimeout(180_000)
+            verifyPeer(false)
+            setTicketKey(ticketKey)
+        }
+        val session: ByteArray
+        TestPipe.newWithServerConfig(serverConfig1).use { pipe ->
+            pipe.handshake()
+            assertTrue(pipe.client.isEstablished)
+            assertTrue(pipe.server.isEstablished)
+            assertFalse(pipe.client.isResumed)
+            assertFalse(pipe.server.isResumed)
+            session = pipe.client.session() ?: fail("session ticket should be available")
+        }
+
+        // Second handshake — resume using saved session.
+        val serverConfig2 = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamsBidi(3)
+            setMaxIdleTimeout(180_000)
+            verifyPeer(false)
+            setTicketKey(ticketKey)
+        }
+        TestPipe.newWithServerConfig(serverConfig2).use { pipe ->
+            pipe.client.setSession(session)
+            pipe.handshake()
+            assertTrue(pipe.client.isEstablished)
+            assertTrue(pipe.server.isEstablished)
+            assertTrue(pipe.client.isResumed)
+            assertTrue(pipe.server.isResumed)
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:handshake_alpn_mismatch (line 617)
+
+    /**
+     * Ported from tests.rs:handshake_alpn_mismatch()
+     * Client uses different ALPN protocols than server, handshake fails with TlsFail.
+     *
+     * Note: The Rust test also checks `sent_count == 1` (internal field). We
+     * verify the observable behavior: both sides report empty application_proto.
+     */
+    @Test
+    fun testHandshakeAlpnMismatch() {
+        // Client uses proto3/proto4, server uses proto1/proto2 (default).
+        val mismatchedProtos = byteArrayOf(
+            0x06, 'p'.code.toByte(), 'r'.code.toByte(), 'o'.code.toByte(),
+            't'.code.toByte(), 'o'.code.toByte(), '3'.code.toByte(),
+            0x06, 'p'.code.toByte(), 'r'.code.toByte(), 'o'.code.toByte(),
+            't'.code.toByte(), 'o'.code.toByte(), '4'.code.toByte(),
+        )
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(mismatchedProtos)
+            setMaxIdleTimeout(180_000)
+            verifyPeer(false)
+        }
+        TestPipe.newWithClientConfig(clientConfig).use { pipe ->
+            try {
+                pipe.handshake()
+                fail("handshake should fail with ALPN mismatch")
+            } catch (_: KicheException) {
+                // Expected: TlsFail during handshake
+            }
+
+            // Both sides should report empty ALPN.
+            val clientProto = pipe.client.applicationProto()
+            assertTrue(clientProto == null || clientProto.isEmpty())
+            val serverProto = pipe.server.applicationProto()
+            assertTrue(serverProto == null || serverProto.isEmpty())
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:stream_left_reset_bidi (line 2129)
+
+    /**
+     * Ported from tests.rs:stream_left_reset_bidi()
+     * Client opens 3 bidi streams (the limit), resets one, server resets its
+     * side too → client gets one stream slot back. Repeat for all 3 → all
+     * slots recovered.
+     */
+    @Test
+    fun testStreamLeftResetBidi() {
+        TestPipe.newWithSmallLimits().use { pipe ->
+            pipe.handshake()
+
+            assertEquals(3, pipe.client.peerStreamsLeftBidi())
+            assertEquals(3, pipe.server.peerStreamsLeftBidi())
+
+            // Client opens 3 bidi streams.
+            pipe.client.streamSend(0, "a".encodeToByteArray(), 1, fin = false)
+            assertEquals(2, pipe.client.peerStreamsLeftBidi())
+            pipe.client.streamSend(4, "a".encodeToByteArray(), 1, fin = false)
+            assertEquals(1, pipe.client.peerStreamsLeftBidi())
+            pipe.client.streamSend(8, "a".encodeToByteArray(), 1, fin = false)
+            assertEquals(0, pipe.client.peerStreamsLeftBidi())
+
+            // Client resets stream 0 (Write direction sends RESET_STREAM).
+            pipe.client.streamShutdown(0, KicheShutdown.Write, 1001)
+            pipe.advance()
+
+            assertEquals(0, pipe.client.peerStreamsLeftBidi())
+
+            // Server reads stream 0 and gets StreamReset.
+            val buf = ByteArray(1024)
+            assertFailsWith<KicheException> {
+                pipe.server.streamRecv(0, buf, buf.size)
+            }.also { assertEquals(KicheError.StreamReset, it.error) }
+
+            // Server resets stream 0 in response.
+            pipe.server.streamShutdown(0, KicheShutdown.Write, 1001)
+            pipe.advance()
+
+            // Client gets one slot back.
+            assertEquals(1, pipe.client.peerStreamsLeftBidi())
+
+            // Reset remaining 2 streams from both sides.
+            pipe.client.streamShutdown(4, KicheShutdown.Write, 1001)
+            pipe.client.streamShutdown(8, KicheShutdown.Write, 1001)
+            pipe.advance()
+
+            assertFailsWith<KicheException> {
+                pipe.server.streamRecv(4, buf, buf.size)
+            }.also { assertEquals(KicheError.StreamReset, it.error) }
+            assertFailsWith<KicheException> {
+                pipe.server.streamRecv(8, buf, buf.size)
+            }.also { assertEquals(KicheError.StreamReset, it.error) }
+
+            pipe.server.streamShutdown(4, KicheShutdown.Write, 1001)
+            pipe.server.streamShutdown(8, KicheShutdown.Write, 1001)
+            pipe.advance()
+
+            // All 3 slots recovered.
+            assertEquals(3, pipe.client.peerStreamsLeftBidi())
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:stream_shutdown_uni (line 4097)
+
+    /**
+     * Ported from tests.rs:stream_shutdown_uni()
+     * Validates that only valid shutdown directions are allowed on uni streams:
+     * can shutdown Write on a send-only stream, Read on a receive-only stream,
+     * but not the reverse.
+     */
+    @Test
+    fun testStreamShutdownUni() {
+        TestPipe.newWithSmallLimits().use { pipe ->
+            pipe.handshake()
+
+            // Client sends on uni stream 2 (client-initiated uni), server on 3 (server-initiated uni).
+            pipe.client.streamSend(2, "hello, world".encodeToByteArray(), 10, fin = false)
+            pipe.server.streamSend(3, "hello, world".encodeToByteArray(), 10, fin = false)
+            pipe.advance()
+
+            // Client can shutdown Write on stream 2 (it's the sender).
+            pipe.client.streamShutdown(2, KicheShutdown.Write, 42)
+
+            // Client cannot shutdown Read on stream 2 (it's send-only for client).
+            assertFailsWith<KicheException> {
+                pipe.client.streamShutdown(2, KicheShutdown.Read, 42)
+            }.also { assertEquals(KicheError.InvalidStreamState, it.error) }
+
+            // Client cannot shutdown Write on stream 3 (it's receive-only for client).
+            assertFailsWith<KicheException> {
+                pipe.client.streamShutdown(3, KicheShutdown.Write, 42)
+            }.also { assertEquals(KicheError.InvalidStreamState, it.error) }
+
+            // Client can shutdown Read on stream 3 (it's the receiver).
+            pipe.client.streamShutdown(3, KicheShutdown.Read, 42)
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:stream_shutdown_write_unsent_tx_cap (line 4220)
+
+    /**
+     * Ported from tests.rs:stream_shutdown_write_unsent_tx_cap()
+     * With max_data=15, the server fills the connection-level flow control
+     * window by buffering data on stream 4. After shutting down Write on
+     * stream 4, unsent data is dropped and the freed capacity allows the
+     * server to send on a different stream (8).
+     *
+     * Note: Rust test also checks internal pipe.server.tx_data and
+     * pipe.client.flow_control.should_update_max_data() — skipped here.
+     */
+    @Test
+    fun testStreamShutdownWriteUnsentTxCap() {
+        TestPipe.newWithSmallMaxData().use { pipe ->
+            pipe.handshake()
+
+            // Client sends data on stream 4 so the server can respond.
+            pipe.client.streamSend(4, "hello".encodeToByteArray(), 5, fin = true)
+            pipe.advance()
+
+            // Server reads client data.
+            val buf = ByteArray(1024)
+            pipe.server.streamRecv(4, buf, buf.size)
+
+            // Server sends 5 bytes (delivered).
+            assertEquals(5, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+            pipe.advance()
+
+            // Server buffers more data until connection-level flow control exhausted.
+            assertEquals(5, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+            assertEquals(5, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+            // max_data=15 reached, next send should return Done.
+            assertEquals(-1, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+
+            // Server shuts down Write on stream 4 → unsent buffered data dropped.
+            pipe.server.streamShutdown(4, KicheShutdown.Write, 42)
+
+            // Server can now send on a different stream (flow control freed).
+            pipe.client.streamSend(8, "hello".encodeToByteArray(), 5, fin = true)
+            pipe.advance()
+
+            assertEquals(5, pipe.server.streamSend(8, "hello".encodeToByteArray(), 5, fin = false))
+            assertEquals(5, pipe.server.streamSend(8, "hello".encodeToByteArray(), 5, fin = false))
+            // Should hit the limit again.
+            assertEquals(-1, pipe.server.streamSend(8, "hello".encodeToByteArray(), 5, fin = false))
+            pipe.advance()
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:stop_sending_unsent_tx_cap (line 3437)
+
+    /**
+     * Ported from tests.rs:stop_sending_unsent_tx_cap()
+     * Same as stream_shutdown_write_unsent_tx_cap but the flow control is
+     * freed by the client sending STOP_SENDING (via stream_shutdown Read)
+     * instead of the server shutting down Write.
+     *
+     * Note: Rust test injects a raw StopSending frame via send_pkt_to_server.
+     * We achieve the same effect using the public API: client calls
+     * stream_shutdown(Read) which sends STOP_SENDING to the server.
+     */
+    @Test
+    fun testStopSendingUnsentTxCap() {
+        TestPipe.newWithSmallMaxData().use { pipe ->
+            pipe.handshake()
+
+            // Client sends data on stream 4 so the server can respond.
+            pipe.client.streamSend(4, "hello".encodeToByteArray(), 5, fin = true)
+            pipe.advance()
+
+            // Server reads client data.
+            val buf = ByteArray(1024)
+            pipe.server.streamRecv(4, buf, buf.size)
+
+            // Server sends 5 bytes (delivered).
+            assertEquals(5, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+            pipe.advance()
+
+            // Server buffers more data until connection-level flow control exhausted.
+            assertEquals(5, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+            assertEquals(5, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+            assertEquals(-1, pipe.server.streamSend(4, "hello".encodeToByteArray(), 5, fin = false))
+
+            // Client sends STOP_SENDING on stream 4 (shutdown Read direction).
+            pipe.client.streamShutdown(4, KicheShutdown.Read, 42)
+            pipe.advance()
+
+            // Server can now send on a different stream (flow control freed by STOP_SENDING).
+            pipe.client.streamSend(8, "hello".encodeToByteArray(), 5, fin = true)
+            pipe.advance()
+
+            assertEquals(5, pipe.server.streamSend(8, "hello".encodeToByteArray(), 5, fin = false))
+            assertEquals(5, pipe.server.streamSend(8, "hello".encodeToByteArray(), 5, fin = false))
+            assertEquals(-1, pipe.server.streamSend(8, "hello".encodeToByteArray(), 5, fin = false))
+            pipe.advance()
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:dgram_send_fails_invalidstate (line 8130)
+
+    /**
+     * Ported from tests.rs:dgram_send_fails_invalidstate()
+     * Sending a datagram on a connection with datagrams disabled → InvalidState.
+     */
+    @Test
+    fun testDgramSendFailsInvalidState() {
+        TestPipe.newNoDgram().use { pipe ->
+            pipe.handshake()
+
+            assertFailsWith<KicheException> {
+                pipe.client.dgramSend("hello, world".encodeToByteArray(), 12)
+            }.also { assertEquals(KicheError.InvalidState, it.error) }
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:dgram_recv_queue_overflow (line 8398)
+
+    /**
+     * Ported from tests.rs:dgram_recv_queue_overflow()
+     * With recv queue len=2, sending 3 datagrams drops the oldest;
+     * only the 2 most recent are received.
+     */
+    @Test
+    fun testDgramRecvQueueOverflow() {
+        TestPipe.new(dgramRecvQueueLen = 2, dgramSendQueueLen = 10).use { pipe ->
+            pipe.handshake()
+
+            pipe.client.dgramSend("hello, world".encodeToByteArray(), 12)
+            pipe.client.dgramSend("ciao, mondo".encodeToByteArray(), 11)
+            pipe.client.dgramSend("hola, mundo".encodeToByteArray(), 11)
+
+            pipe.advance()
+
+            // Oldest ("hello, world") was dropped. "ciao, mondo" is first.
+            val buf = ByteArray(1024)
+            val r1 = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(11, r1)
+            assertEquals('c'.code.toByte(), buf[0])
+            assertEquals('i'.code.toByte(), buf[1])
+
+            val r2 = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(11, r2)
+            assertEquals('h'.code.toByte(), buf[0])
+            assertEquals('o'.code.toByte(), buf[1])
+
+            // No more datagrams (Done → returns -1).
+            assertEquals(-1, pipe.server.dgramRecv(buf, buf.size))
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:app_peer_error (line 8921)
+
+    /**
+     * Ported from tests.rs:app_peer_error()
+     * Complement of peer_error — tests APPLICATION_CLOSE (is_app=true).
+     */
+    @Test
+    fun testAppPeerError() {
+        TestPipe.new().use { pipe ->
+            pipe.handshake()
+
+            pipe.server.closeConnection(app = true, err = 0x1234, reason = "hello!".encodeToByteArray())
+            pipe.advance()
+
+            val err = pipe.client.peerError()
+            assertNotNull(err)
+            assertTrue(err.isApp)
+            assertEquals(0x1234, err.errorCode)
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:app_close_by_server_during_handshake_established (line 8803)
+
+    /**
+     * Ported from tests.rs:app_close_by_server_during_handshake_established()
+     * Server closes with app error after both sides are established but before
+     * the final handshake ACK is sent. Error propagates correctly.
+     */
+    @Test
+    fun testAppCloseByServerDuringHandshakeEstablished() {
+        TestPipe.new().use { pipe ->
+            // Client → Server (Initial)
+            pipe.flushClient()
+            // Server → Client (Handshake)
+            pipe.flushServer()
+
+            assertFalse(pipe.server.isEstablished)
+            assertTrue(pipe.client.isEstablished)
+
+            // Client sends 1-RTT data
+            pipe.client.streamSend(0, "badauthtoken".encodeToByteArray(), 12, fin = true)
+            pipe.flushClient()
+
+            // Server is now established
+            assertTrue(pipe.server.isEstablished)
+
+            // Server closes with app error
+            pipe.server.closeConnection(app = true, err = 123, reason = "Invalid authentication".encodeToByteArray())
+            pipe.advance()
+
+            val localErr = pipe.server.localError()
+            assertNotNull(localErr)
+            assertTrue(localErr.isApp)
+            assertEquals(123, localErr.errorCode)
+
+            val peerErr = pipe.client.peerError()
+            assertNotNull(peerErr)
+            assertTrue(peerErr.isApp)
+            assertEquals(123, peerErr.errorCode)
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:transport_close_by_client_during_handshake_established (line 8859)
+
+    /**
+     * Ported from tests.rs:transport_close_by_client_during_handshake_established()
+     * Client sends transport close after it becomes established (but before
+     * server is fully established). Error propagates to server.
+     */
+    @Test
+    fun testTransportCloseByClientDuringHandshakeEstablished() {
+        TestPipe.new().use { pipe ->
+            // Client → Server (Initial)
+            pipe.flushClient()
+            // Server → Client (Handshake)
+            pipe.flushServer()
+
+            assertFalse(pipe.server.isEstablished)
+            assertTrue(pipe.client.isEstablished)
+
+            // Client sends transport close
+            pipe.client.closeConnection(app = false, err = 123, reason = "connection close".encodeToByteArray())
+            pipe.flushClient()
+
+            val peerErr = pipe.server.peerError()
+            assertNotNull(peerErr)
+            assertFalse(peerErr.isApp)
+            assertEquals(123, peerErr.errorCode)
+
+            val localErr = pipe.client.localError()
+            assertNotNull(localErr)
+            assertFalse(localErr.isApp)
+            assertEquals(123, localErr.errorCode)
         }
     }
 

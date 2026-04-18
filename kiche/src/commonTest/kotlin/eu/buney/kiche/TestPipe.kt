@@ -23,7 +23,7 @@ class TestPipe(
         val CLIENT_ADDR = KicheAddress(byteArrayOf(127, 0, 0, 1), 1234)
         val SERVER_ADDR = KicheAddress(byteArrayOf(127, 0, 0, 1), 4321)
 
-        private val PROTOS = byteArrayOf(
+        val PROTOS = byteArrayOf(
             0x06, 'p'.code.toByte(), 'r'.code.toByte(), 'o'.code.toByte(),
             't'.code.toByte(), 'o'.code.toByte(), '1'.code.toByte()
         )
@@ -64,6 +64,126 @@ class TestPipe(
                 setAckDelayExponent(8)
             }
 
+            return createPipe(clientConfig, serverConfig)
+        }
+
+        /**
+         * Creates a pipe with small max_data but large per-stream limits:
+         * max_data=15, stream_bidi/uni=30, max_streams_bidi=3.
+         * Useful for tests where connection-level flow control is the bottleneck
+         * and stream shutdown should release capacity.
+         */
+        fun newWithSmallMaxData(): TestPipe {
+            val certDir = quicheCertDir()
+
+            val serverConfig = KicheConfig().apply {
+                loadCertChainFromPemFile("$certDir/cert.crt")
+                loadPrivKeyFromPemFile("$certDir/cert.key")
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(15)
+                setInitialMaxStreamDataBidiLocal(30)
+                setInitialMaxStreamDataBidiRemote(30)
+                setInitialMaxStreamDataUni(30)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(0)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+            }
+
+            val clientConfig = KicheConfig().apply {
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(15)
+                setInitialMaxStreamDataBidiLocal(30)
+                setInitialMaxStreamDataBidiRemote(30)
+                setInitialMaxStreamDataUni(30)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(0)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+            }
+
+            return createPipe(clientConfig, serverConfig)
+        }
+
+        /**
+         * Creates a pipe without datagrams enabled.
+         */
+        fun newNoDgram(): TestPipe {
+            val certDir = quicheCertDir()
+
+            val serverConfig = KicheConfig().apply {
+                loadCertChainFromPemFile("$certDir/cert.crt")
+                loadPrivKeyFromPemFile("$certDir/cert.key")
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(30)
+                setInitialMaxStreamDataBidiLocal(15)
+                setInitialMaxStreamDataBidiRemote(15)
+                setInitialMaxStreamDataUni(10)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(3)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+            }
+
+            val clientConfig = KicheConfig().apply {
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(30)
+                setInitialMaxStreamDataBidiLocal(15)
+                setInitialMaxStreamDataBidiRemote(15)
+                setInitialMaxStreamDataUni(10)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(3)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+            }
+
+            return createPipe(clientConfig, serverConfig)
+        }
+
+        /**
+         * Creates a pipe with separate client and server configs, matching
+         * quiche's with_server_config() — default client config, custom server.
+         */
+        fun newWithServerConfig(serverConfig: KicheConfig): TestPipe {
+            val clientConfig = KicheConfig().apply {
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(30)
+                setInitialMaxStreamDataBidiLocal(15)
+                setInitialMaxStreamDataBidiRemote(15)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(3)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+                setAckDelayExponent(8)
+            }
+
+            return createPipe(clientConfig, serverConfig)
+        }
+
+        /**
+         * Creates a pipe with a custom client config and default server config,
+         * matching quiche's with_client_config().
+         */
+        fun newWithClientConfig(clientConfig: KicheConfig): TestPipe {
+            val certDir = quicheCertDir()
+            val serverConfig = KicheConfig().apply {
+                loadCertChainFromPemFile("$certDir/cert.crt")
+                loadPrivKeyFromPemFile("$certDir/cert.key")
+                setApplicationProtos(PROTOS)
+                setInitialMaxData(30)
+                setInitialMaxStreamDataBidiLocal(15)
+                setInitialMaxStreamDataBidiRemote(15)
+                setInitialMaxStreamsBidi(3)
+                setInitialMaxStreamsUni(3)
+                setMaxIdleTimeout(180_000)
+                verifyPeer(false)
+                setAckDelayExponent(8)
+            }
+
+            return createPipe(clientConfig, serverConfig)
+        }
+
+        private fun createPipe(clientConfig: KicheConfig, serverConfig: KicheConfig): TestPipe {
             val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
             val serverScid = ByteArray(16) { (it + 0x50).toByte() }
 
@@ -113,19 +233,7 @@ class TestPipe(
                 enableDgram(true, dgramRecvQueueLen, dgramSendQueueLen)
             }
 
-            val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
-            val serverScid = ByteArray(16) { (it + 0x50).toByte() }
-
-            val client = KicheConnection.connect(
-                serverName = "quic.tech", scid = clientScid,
-                local = CLIENT_ADDR, peer = SERVER_ADDR, config = clientConfig,
-            )
-            val server = KicheConnection.accept(
-                scid = serverScid, odcid = null,
-                local = SERVER_ADDR, peer = CLIENT_ADDR, config = serverConfig,
-            )
-
-            return TestPipe(client, server, clientConfig, serverConfig)
+            return createPipe(clientConfig, serverConfig)
         }
     }
 
@@ -162,6 +270,12 @@ class TestPipe(
             else processFlight(client, sf)
         }
     }
+
+    /** Sends all pending packets from client to server. */
+    fun flushClient() = processFlight(server, emitFlight(client))
+
+    /** Sends all pending packets from server to client. */
+    fun flushServer() = processFlight(client, emitFlight(server))
 
     private fun emitFlight(conn: KicheConnection): List<Pair<ByteArray, KicheSendResult>> {
         val flight = mutableListOf<Pair<ByteArray, KicheSendResult>>()
