@@ -1,6 +1,7 @@
 package eu.buney.kiche.ktor
 
 import eu.buney.kiche.*
+import eu.buney.kiche.ktor.webtransport.*
 import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.http.content.*
@@ -504,6 +505,105 @@ internal class KicheEndpoint(
         coroutineContext.job.cancel()
         log("endpoint.close() job cancelled")
         return coroutineContext.job
+    }
+
+    /**
+     * Opens a WebTransport session over a dedicated QUIC + H3 connection.
+     *
+     * Creates a fresh QUIC connection with Extended CONNECT enabled, performs
+     * the handshake, and sends the CONNECT request to establish the WT session.
+     */
+    suspend fun openWebTransportSession(url: Url): WebTransportSession {
+        log("openWebTransportSession: $url")
+
+        val socketAddr = InetSocketAddress(host, port)
+        val peerIp = socketAddr.resolveAddress()
+            ?: error("Failed to resolve address for $host")
+        val peerAddr = KicheAddress(ip = peerIp, port = port)
+
+        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(host, 0))
+        val localSocketAddr = socket.localAddress as InetSocketAddress
+        val localAddr = KicheAddress(
+            ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
+            port = localSocketAddr.port,
+        )
+
+        val scid = Random.nextBytes(16)
+        val handshakeBuf = ByteArray(MAX_DATAGRAM_SIZE)
+
+        val qConfig = KicheConfig().apply {
+            setApplicationProtos(H3_ALPN)
+            verifyPeer(config.verifyPeer)
+            config.caCertPath?.let { loadVerifyLocationsFromFile(it) }
+            setCcAlgorithm(config.ccAlgorithm)
+            setMaxIdleTimeout(config.maxIdleTimeoutMs)
+            setInitialMaxData(config.initialMaxData)
+            setInitialMaxStreamDataBidiLocal(config.initialMaxStreamDataBidiLocal)
+            setInitialMaxStreamDataBidiRemote(config.initialMaxStreamDataBidiRemote)
+            setInitialMaxStreamDataUni(config.initialMaxStreamDataUni)
+            setInitialMaxStreamsBidi(config.initialMaxStreamsBidi)
+            setInitialMaxStreamsUni(config.initialMaxStreamsUni)
+            enableDgram(true, 65535, 65535)
+        }
+
+        try {
+            val newConn = KicheConnection.connect(host, scid, localAddr, peerAddr, qConfig)
+
+            try {
+                // Drive handshake
+                drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                while (!newConn.isEstablished) {
+                    val timeout = newConn.timeoutAsMillis().coerceIn(1, 1000)
+                    val dgram = withTimeoutOrNull(timeout) { socket.receive() }
+                    if (dgram == null) {
+                        newConn.onTimeout()
+                        drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                        continue
+                    }
+                    val bytes = dgram.packet.readByteArray()
+                    newConn.recv(bytes, bytes.size, peerAddr, localAddr)
+                    drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                }
+
+                log("openWebTransportSession: QUIC handshake complete")
+
+                // Create H3 layer with Extended CONNECT enabled
+                val h3Cfg = KicheH3Config().apply {
+                    enableExtendedConnect(true)
+                }
+                val h3 = try {
+                    KicheH3Connection(newConn, h3Cfg)
+                } catch (e: Throwable) {
+                    h3Cfg.close()
+                    throw e
+                }
+
+                // Create the session and establish it
+                val session = KicheWebTransportSession(
+                    conn = newConn,
+                    h3Conn = h3,
+                    h3Config = h3Cfg,
+                    quicConfig = qConfig,
+                    udpSocket = socket,
+                    peerSocketAddr = socketAddr,
+                    localAddr = localAddr,
+                    peerAddr = peerAddr,
+                    parentContext = coroutineContext,
+                )
+
+                val path = url.encodedPathAndQuery.ifEmpty { "/" }
+                session.establish(path, url.hostWithPort)
+
+                return session
+            } catch (e: Throwable) {
+                newConn.close()
+                throw e
+            }
+        } catch (e: Throwable) {
+            qConfig.close()
+            socket.close()
+            throw e
+        }
     }
 
     companion object {

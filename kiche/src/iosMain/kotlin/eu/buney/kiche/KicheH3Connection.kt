@@ -123,6 +123,9 @@ actual class KicheH3Connection actual constructor(
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =
         quiche_h3_dgram_enabled_by_peer(h3(), quicConn.ptr!!.reinterpret())
 
+    actual fun extendedConnectEnabledByPeer(): Boolean =
+        quiche_h3_extended_connect_enabled_by_peer(h3())
+
     actual fun stats(): KicheH3Stats = memScoped {
         val s = alloc<quiche_h3_stats>()
         quiche_h3_conn_stats(h3(), s.ptr)

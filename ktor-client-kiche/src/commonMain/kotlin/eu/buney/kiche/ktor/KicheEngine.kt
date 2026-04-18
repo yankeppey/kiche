@@ -1,8 +1,10 @@
 package eu.buney.kiche.ktor
 
+import eu.buney.kiche.ktor.webtransport.*
 import io.ktor.client.engine.*
 import io.ktor.client.plugins.*
 import io.ktor.client.request.*
+import io.ktor.http.*
 import io.ktor.network.selector.*
 import io.ktor.util.*
 import io.ktor.util.collections.*
@@ -24,10 +26,11 @@ private fun log(msg: String) {
  * a long-lived QUIC connection and multiplexes requests as independent H3 streams.
  */
 @OptIn(InternalAPI::class)
-public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEngineBase("ktor-kiche") {
+public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEngineBase("ktor-kiche"),
+    KicheWebTransportEngine {
 
     override val supportedCapabilities: Set<HttpClientEngineCapability<*>> =
-        setOf(HttpTimeoutCapability)
+        setOf(HttpTimeoutCapability, WebTransportCapability)
 
     private val requestsJob: CoroutineContext
 
@@ -84,6 +87,26 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
 
         log("engine.execute: ${data.method.value} ${data.url} → endpoint $endpointId")
         return endpoint.execute(data, callContext, requestTime)
+    }
+
+    override suspend fun openWebTransportSession(url: Url): WebTransportSession {
+        val host = url.host
+        val port = url.port.takeIf { it != 0 } ?: KicheEndpoint.DEFAULT_HTTPS_PORT
+        val endpointId = "wt:$host:$port"
+
+        val endpoint = endpoints.computeIfAbsent(endpointId) {
+            KicheEndpoint(
+                host = host,
+                port = port,
+                config = config,
+                selectorManager = selectorManager,
+                parentContext = coroutineContext,
+                onDone = { endpoints.remove(endpointId) },
+            )
+        }
+
+        log("engine.openWebTransportSession: $url → endpoint $endpointId")
+        return endpoint.openWebTransportSession(url)
     }
 
     override fun close() {
