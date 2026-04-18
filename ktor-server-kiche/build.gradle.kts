@@ -1,9 +1,20 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.androidLibrary)
+}
+
+android {
+    namespace = "eu.buney.kiche.ktor.server"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+
+    defaultConfig {
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
 }
 
 kotlin {
     jvmToolchain(17)
+    androidTarget()
     jvm()
     iosArm64()
     iosSimulatorArm64()
@@ -23,6 +34,11 @@ kotlin {
             implementation(libs.ktor.client.core)
             implementation(project(":ktor-client-kiche"))
         }
+        val androidAndJvmTest by creating {
+            dependsOn(commonTest.get())
+        }
+        androidUnitTest.get().dependsOn(androidAndJvmTest)
+        jvmTest.get().dependsOn(androidAndJvmTest)
         jvmTest.dependencies {
             implementation(libs.ktor.server.test.host)
             implementation(libs.slf4j.simple)
