@@ -736,10 +736,323 @@ class KicheH3Test {
 
     //endregion
 
-    // --- Helpers ---
+    //region h3/mod.rs:poll_datagram_cycling_no_read (line 6810)
+
+    /**
+     * Ported from h3/mod.rs:poll_datagram_cycling_no_read()
+     * Send a request + body + datagram. Poll returns Headers and Data
+     * events for the request but not the datagram (datagrams don't
+     * generate poll events — they're read via recv_dgram).
+     */
+    @Test
+    fun testPollDatagramCyclingNoRead() {
+        TestSession.newWithQuicConfig {
+            setInitialMaxData(1500)
+            setInitialMaxStreamDataBidiLocal(150)
+            setInitialMaxStreamDataBidiRemote(150)
+            setInitialMaxStreamDataUni(150)
+            setInitialMaxStreamsBidi(100)
+            setInitialMaxStreamsUni(5)
+            enableDgram(true, 100, 100)
+        }.use { s ->
+            val stream = s.sendRequest(fin = false)
+            s.sendBodyClient(stream, fin = true)
+            s.sendDgramClient(0)
+
+            // Server sees stream events, not datagram events
+            val ev1 = s.pollServer()
+            assertNotNull(ev1)
+            assertEquals(KicheH3EventType.Headers, ev1.type)
+            assertEquals(stream, ev1.streamId)
+
+            val ev2 = s.pollServer()
+            assertNotNull(ev2)
+            assertEquals(KicheH3EventType.Data, ev2.type)
+
+            assertNull(s.pollServer())
+        }
+    }
+
+    //endregion
+
+    //region h3/mod.rs:poll_datagram_single_read (line 6852)
+
+    /**
+     * Ported from h3/mod.rs:poll_datagram_single_read()
+     * Request + body + datagram from client, then response + body + datagram
+     * from server. Verifies correct interleaving of stream and datagram reads.
+     */
+    @Test
+    fun testPollDatagramSingleRead() {
+        TestSession.newWithQuicConfig {
+            setInitialMaxData(1500)
+            setInitialMaxStreamDataBidiLocal(150)
+            setInitialMaxStreamDataBidiRemote(150)
+            setInitialMaxStreamDataUni(150)
+            setInitialMaxStreamsBidi(100)
+            setInitialMaxStreamsUni(5)
+            enableDgram(true, 100, 100)
+        }.use { s ->
+            val buf = ByteArray(65535)
+            val expected = Triple(11, 0L, 1)
+
+            // Client sends request + body + datagram
+            val stream = s.sendRequest(fin = false)
+            val body = s.sendBodyClient(stream, fin = true)
+            val recvBuf = ByteArray(body.size)
+
+            s.sendDgramClient(0)
+
+            // Server: headers, data events
+            val ev1 = s.pollServer()
+            assertNotNull(ev1)
+            assertEquals(KicheH3EventType.Headers, ev1.type)
+
+            val ev2 = s.pollServer()
+            assertNotNull(ev2)
+            assertEquals(KicheH3EventType.Data, ev2.type)
+
+            assertNull(s.pollServer())
+
+            // Server reads datagram
+            assertEquals(expected, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+
+            // Server reads body → Finished
+            assertEquals(body.size, s.recvBodyServer(stream, recvBuf))
+            val ev3 = s.pollServer()
+            assertNotNull(ev3)
+            assertEquals(KicheH3EventType.Finished, ev3.type)
+            assertNull(s.pollServer())
+
+            // Server responds + body + datagram
+            s.sendResponse(stream, fin = false)
+            s.sendBodyServer(stream, fin = true)
+            s.sendDgramServer(0)
+
+            // Client: headers, data events
+            val ev4 = s.pollClient()
+            assertNotNull(ev4)
+            assertEquals(KicheH3EventType.Headers, ev4.type)
+
+            val ev5 = s.pollClient()
+            assertNotNull(ev5)
+            assertEquals(KicheH3EventType.Data, ev5.type)
+
+            assertNull(s.pollClient())
+
+            // Client reads datagram
+            assertEquals(expected, s.recvDgramClient(buf))
+            assertNull(s.pollClient())
+
+            // Client reads body → Finished
+            assertEquals(body.size, s.recvBodyClient(stream, recvBuf))
+            val ev6 = s.pollClient()
+            assertNotNull(ev6)
+            assertEquals(KicheH3EventType.Finished, ev6.type)
+            assertNull(s.pollClient())
+        }
+    }
+
+    //endregion
+
+    //region h3/mod.rs:poll_datagram_multi_read (line 6937)
+
+    /**
+     * Ported from h3/mod.rs:poll_datagram_multi_read()
+     * Multiple datagrams on flow_id 0 and 2 interleaved with stream data.
+     * Verifies datagrams are received in order across flow IDs.
+     */
+    @Test
+    fun testPollDatagramMultiRead() {
+        TestSession.newWithQuicConfig {
+            setInitialMaxData(1500)
+            setInitialMaxStreamDataBidiLocal(150)
+            setInitialMaxStreamDataBidiRemote(150)
+            setInitialMaxStreamDataUni(150)
+            setInitialMaxStreamsBidi(100)
+            setInitialMaxStreamsUni(5)
+            enableDgram(true, 100, 100)
+        }.use { s ->
+            val buf = ByteArray(65535)
+            val flow0 = Triple(11, 0L, 1)
+            val flow2 = Triple(11, 2L, 1)
+
+            // Client sends request + body
+            val stream = s.sendRequest(fin = false)
+            val body = s.sendBodyClient(stream, fin = true)
+            val recvBuf = ByteArray(body.size)
+
+            // Client sends 5 datagrams on flow 0, 5 on flow 2
+            for (i in 0 until 5) s.sendDgramClient(0)
+            for (i in 0 until 5) s.sendDgramClient(2)
+
+            // Server: headers, data
+            val ev1 = s.pollServer()
+            assertNotNull(ev1)
+            assertEquals(KicheH3EventType.Headers, ev1.type)
+            val ev2 = s.pollServer()
+            assertNotNull(ev2)
+            assertEquals(KicheH3EventType.Data, ev2.type)
+            assertNull(s.pollServer())
+
+            // Read 3 flow-0 datagrams
+            assertEquals(flow0, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+            assertEquals(flow0, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+            assertEquals(flow0, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+
+            // Read body → Finished
+            assertEquals(body.size, s.recvBodyServer(stream, recvBuf))
+            val ev3 = s.pollServer()
+            assertNotNull(ev3)
+            assertEquals(KicheH3EventType.Finished, ev3.type)
+            assertNull(s.pollServer())
+
+            // Read remaining flow-0 datagrams, then flow-2
+            assertEquals(flow0, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+            assertEquals(flow0, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+
+            for (i in 0 until 5) {
+                assertEquals(flow2, s.recvDgramServer(buf))
+                assertNull(s.pollServer())
+            }
+
+            // --- Server responds + datagrams ---
+            s.sendResponse(stream, fin = false)
+            s.sendBodyServer(stream, fin = true)
+
+            for (i in 0 until 5) s.sendDgramServer(0)
+            for (i in 0 until 5) s.sendDgramServer(2)
+
+            // Client: headers, data
+            val ev4 = s.pollClient()
+            assertNotNull(ev4)
+            assertEquals(KicheH3EventType.Headers, ev4.type)
+            val ev5 = s.pollClient()
+            assertNotNull(ev5)
+            assertEquals(KicheH3EventType.Data, ev5.type)
+            assertNull(s.pollClient())
+
+            // Read 3 flow-0 datagrams
+            assertEquals(flow0, s.recvDgramClient(buf))
+            assertNull(s.pollClient())
+            assertEquals(flow0, s.recvDgramClient(buf))
+            assertNull(s.pollClient())
+            assertEquals(flow0, s.recvDgramClient(buf))
+            assertNull(s.pollClient())
+
+            // Read body → Finished
+            assertEquals(body.size, s.recvBodyClient(stream, recvBuf))
+            val ev6 = s.pollClient()
+            assertNotNull(ev6)
+            assertEquals(KicheH3EventType.Finished, ev6.type)
+            assertNull(s.pollClient())
+
+            // Read remaining flow-0, then flow-2
+            assertEquals(flow0, s.recvDgramClient(buf))
+            assertNull(s.pollClient())
+            assertEquals(flow0, s.recvDgramClient(buf))
+            assertNull(s.pollClient())
+
+            for (i in 0 until 5) {
+                assertEquals(flow2, s.recvDgramClient(buf))
+                assertNull(s.pollClient())
+            }
+        }
+    }
+
+    //endregion
+
+    //region h3/mod.rs:dgram_event_rearm (line 7312)
+
+    /**
+     * Ported from h3/mod.rs:dgram_event_rearm()
+     * Datagram events re-arm after reads. Multiple datagrams on flow_id 0
+     * and 2, read one at a time, verify poll returns Done between reads.
+     * Then send more datagrams and verify they are also received.
+     *
+     * Note: Rust test also checks internal dgram_sent/recv counters — skipped.
+     */
+    @Test
+    fun testDgramEventRearm() {
+        TestSession.newWithQuicConfig {
+            setInitialMaxData(1500)
+            setInitialMaxStreamDataBidiLocal(150)
+            setInitialMaxStreamDataBidiRemote(150)
+            setInitialMaxStreamDataUni(150)
+            setInitialMaxStreamsBidi(100)
+            setInitialMaxStreamsUni(5)
+            enableDgram(true, 100, 100)
+        }.use { s ->
+            val buf = ByteArray(65535)
+            val flow0 = Triple(11, 0L, 1)
+            val flow2 = Triple(11, 2L, 1)
+
+            // Client sends request + body
+            val stream = s.sendRequest(fin = false)
+            val body = s.sendBodyClient(stream, fin = true)
+            val recvBuf = ByteArray(body.size)
+
+            // Send 2 datagrams on flow 0, 2 on flow 2
+            s.sendDgramClient(0)
+            s.sendDgramClient(0)
+            s.sendDgramClient(2)
+            s.sendDgramClient(2)
+
+            // Server: headers, data
+            val ev1 = s.pollServer()
+            assertNotNull(ev1)
+            assertEquals(KicheH3EventType.Headers, ev1.type)
+            val ev2 = s.pollServer()
+            assertNotNull(ev2)
+            assertEquals(KicheH3EventType.Data, ev2.type)
+
+            // Read datagrams one at a time
+            assertNull(s.pollServer())
+            assertEquals(flow0, s.recvDgramServer(buf))
+
+            assertNull(s.pollServer())
+            assertEquals(flow0, s.recvDgramServer(buf))
+
+            assertNull(s.pollServer())
+            assertEquals(flow2, s.recvDgramServer(buf))
+
+            assertNull(s.pollServer())
+            assertEquals(flow2, s.recvDgramServer(buf))
+
+            assertNull(s.pollServer())
+
+            // Send more datagrams — events re-arm
+            s.sendDgramClient(0)
+            s.sendDgramClient(2)
+
+            assertNull(s.pollServer())
+            assertEquals(flow0, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+            assertEquals(flow2, s.recvDgramServer(buf))
+            assertNull(s.pollServer())
+
+            // Read body → Finished
+            assertEquals(body.size, s.recvBodyServer(stream, recvBuf))
+            val ev3 = s.pollServer()
+            assertNotNull(ev3)
+            assertEquals(KicheH3EventType.Finished, ev3.type)
+        }
+    }
+
+    //endregion
+
+    //region Helpers
 
     private fun assertHeadersContain(headers: List<KicheH3Header>, name: String, value: String) {
         val found = headers.any { it.nameString == name && it.valueString == value }
         assertTrue(found, "Expected header $name: $value, got: ${headers.map { "${it.nameString}: ${it.valueString}" }}")
     }
+
+    //endregion
 }
