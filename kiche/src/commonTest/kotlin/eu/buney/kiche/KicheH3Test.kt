@@ -10,6 +10,7 @@
 package eu.buney.kiche
 
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -35,7 +36,7 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.Headers, ev1.type)
             assertEquals(stream, ev1.streamId)
             assertNotNull(ev1.headers)
-            assertHeadersContain(ev1.headers!!, ":method", "GET")
+            assertHeadersContain(ev1.headers!!, name = ":method", value = "GET")
 
             val ev2 = s.pollServer()
             assertNotNull(ev2)
@@ -43,7 +44,7 @@ class KicheH3Test {
             assertEquals(stream, ev2.streamId)
 
             // Server sends response
-            s.sendResponse(stream, fin = true)
+            s.sendResponse(streamId = stream, fin = true)
 
             // Client receives response headers + finished
             val ev3 = s.pollClient()
@@ -51,16 +52,14 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.Headers, ev3.type)
             assertEquals(stream, ev3.streamId)
             assertNotNull(ev3.headers)
-            assertHeadersContain(ev3.headers!!, ":status", "200")
+            assertHeadersContain(ev3.headers!!, name = ":status", value = "200")
 
             val ev4 = s.pollClient()
             assertNotNull(ev4)
             assertEquals(KicheH3EventType.Finished, ev4.type)
 
-            // No more events
             assertNull(s.pollClient())
         }
-        println("    request_no_body_response_no_body ... OK.")
     }
 
     //endregion
@@ -77,43 +76,36 @@ class KicheH3Test {
             val stream = s.sendRequest(fin = true)
             assertEquals(0, stream)
 
-            // Server receives headers + finished
-            val ev1 = s.pollServer()
-            assertNotNull(ev1)
-            assertEquals(KicheH3EventType.Headers, ev1.type)
+            s.pollServer() // Headers
+            s.pollServer() // Finished
 
-            val ev2 = s.pollServer()
-            assertNotNull(ev2)
-            assertEquals(KicheH3EventType.Finished, ev2.type)
-
-            // Server sends response headers (not fin) + body (fin)
-            s.sendResponse(stream, fin = false)
-            val body = s.sendBodyServer(stream, fin = true)
+            s.sendResponse(streamId = stream, fin = false)
+            val body = s.sendBodyServer(streamId = stream, fin = true)
 
             // Client receives headers
-            val ev3 = s.pollClient()
-            assertNotNull(ev3)
-            assertEquals(KicheH3EventType.Headers, ev3.type)
-            assertHeadersContain(ev3.headers!!, ":status", "200")
+            val ev = s.pollClient()
+            assertNotNull(ev)
+            assertEquals(KicheH3EventType.Headers, ev.type)
+            assertHeadersContain(ev.headers!!, name = ":status", value = "200")
 
             // Client receives data event
-            val ev4 = s.pollClient()
-            assertNotNull(ev4)
-            assertEquals(KicheH3EventType.Data, ev4.type)
+            val evData = s.pollClient()
+            assertNotNull(evData)
+            assertEquals(KicheH3EventType.Data, evData.type)
 
-            // Read body
+            // Read and verify body content
             val recvBuf = ByteArray(body.size)
-            val read = s.recvBodyClient(stream, recvBuf)
+            val read = s.recvBodyClient(streamId = stream, buf = recvBuf)
             assertEquals(body.size, read)
+            assertContentEquals(body, recvBuf.copyOf(read))
 
             // Finished
-            val ev5 = s.pollClient()
-            assertNotNull(ev5)
-            assertEquals(KicheH3EventType.Finished, ev5.type)
+            val evFin = s.pollClient()
+            assertNotNull(evFin)
+            assertEquals(KicheH3EventType.Finished, evFin.type)
 
             assertNull(s.pollClient())
         }
-        println("    request_no_body_response_one_chunk ... OK.")
     }
 
     //endregion
@@ -121,7 +113,7 @@ class KicheH3Test {
     //region h3/mod.rs:request_no_body_response_many_chunks (line 3793)
 
     /**
-     * Ported from h3/mod.rs:request_no_body_response_many_chunks()
+     * Ported from tests.rs:request_no_body_response_many_chunks()
      * Send a request with no body, get a response with multiple DATA frames.
      */
     @Test
@@ -129,16 +121,15 @@ class KicheH3Test {
         TestSession.new().use { s ->
             val stream = s.sendRequest(fin = true)
 
-            // Server drains headers + finished
             s.pollServer() // Headers
             s.pollServer() // Finished
 
-            // Server sends response + 4 body chunks
-            s.sendResponse(stream, fin = false)
-            for (i in 0 until 3) {
-                s.sendBodyServer(stream, fin = false)
+            val totalDataFrames = 4
+            s.sendResponse(streamId = stream, fin = false)
+            for (i in 0 until totalDataFrames - 1) {
+                s.sendBodyServer(streamId = stream, fin = false)
             }
-            val body = s.sendBodyServer(stream, fin = true)
+            val body = s.sendBodyServer(streamId = stream, fin = true)
 
             // Client receives headers
             val ev = s.pollClient()
@@ -150,13 +141,13 @@ class KicheH3Test {
             assertNotNull(evData)
             assertEquals(KicheH3EventType.Data, evData.type)
 
-            // Read all body chunks
+            // Read all body chunks and verify each matches DEFAULT_BODY
             val recvBuf = ByteArray(body.size)
-            var totalRead = 0
-            for (i in 0 until 4) {
-                totalRead += s.recvBodyClient(stream, recvBuf)
+            for (i in 0 until totalDataFrames) {
+                val read = s.recvBodyClient(streamId = stream, buf = recvBuf)
+                assertEquals(body.size, read)
+                assertContentEquals(body, recvBuf.copyOf(read))
             }
-            assertTrue(totalRead > 0)
 
             // Finished
             val evFin = s.pollClient()
@@ -165,7 +156,6 @@ class KicheH3Test {
 
             assertNull(s.pollClient())
         }
-        println("    request_no_body_response_many_chunks ... OK.")
     }
 
     //endregion
@@ -174,13 +164,12 @@ class KicheH3Test {
 
     /**
      * Ported from h3/mod.rs:request_one_chunk_response_no_body()
-     * Send a request with one body chunk, get a response with no body.
      */
     @Test
     fun testRequestOneChunkResponseNoBody() {
         TestSession.new().use { s ->
             val stream = s.sendRequest(fin = false)
-            val body = s.sendBodyClient(stream, fin = true)
+            val body = s.sendBodyClient(streamId = stream, fin = true)
 
             // Server receives headers
             val ev1 = s.pollServer()
@@ -192,10 +181,11 @@ class KicheH3Test {
             assertNotNull(ev2)
             assertEquals(KicheH3EventType.Data, ev2.type)
 
-            // Read body
+            // Read and verify body
             val recvBuf = ByteArray(body.size)
-            val read = s.recvBodyServer(stream, recvBuf)
+            val read = s.recvBodyServer(streamId = stream, buf = recvBuf)
             assertEquals(body.size, read)
+            assertContentEquals(body, recvBuf.copyOf(read))
 
             // Finished
             val ev3 = s.pollServer()
@@ -203,7 +193,7 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.Finished, ev3.type)
 
             // Server responds
-            s.sendResponse(stream, fin = true)
+            s.sendResponse(streamId = stream, fin = true)
 
             // Client receives response
             val ev4 = s.pollClient()
@@ -214,7 +204,6 @@ class KicheH3Test {
             assertNotNull(ev5)
             assertEquals(KicheH3EventType.Finished, ev5.type)
         }
-        println("    request_one_chunk_response_no_body ... OK.")
     }
 
     //endregion
@@ -223,19 +212,19 @@ class KicheH3Test {
 
     /**
      * Ported from h3/mod.rs:goaway_from_client_good()
-     * Send a GOAWAY frame from the client.
+     * Rust test verifies: poll_server() == Ok((0, Event::GoAway))
      */
     @Test
     fun testGoawayFromClientGood() {
         TestSession.new().use { s ->
-            s.client.sendGoaway(s.pipe.client, 100)
+            s.client.sendGoaway(s.pipe.client, id = 100)
             s.advance()
 
             val ev = s.pollServer()
             assertNotNull(ev)
             assertEquals(KicheH3EventType.GoAway, ev.type)
+            assertEquals(0, ev.streamId)
         }
-        println("    goaway_from_client_good ... OK.")
     }
 
     //endregion
@@ -244,12 +233,12 @@ class KicheH3Test {
 
     /**
      * Ported from h3/mod.rs:goaway_from_server_good()
-     * Send a GOAWAY frame from the server.
+     * Rust test verifies: poll_client() == Ok((4000, Event::GoAway))
      */
     @Test
     fun testGoawayFromServerGood() {
         TestSession.new().use { s ->
-            s.server.sendGoaway(s.pipe.server, 4000)
+            s.server.sendGoaway(s.pipe.server, id = 4000)
             s.advance()
 
             val ev = s.pollClient()
@@ -257,7 +246,6 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.GoAway, ev.type)
             assertEquals(4000, ev.streamId)
         }
-        println("    goaway_from_server_good ... OK.")
     }
 
     //endregion

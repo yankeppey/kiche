@@ -168,7 +168,7 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
     actual fun dgramSend(buf: ByteArray, len: Int): Int {
         buf.usePinned { pinned ->
             val rc = quiche_conn_dgram_send(conn(), pinned.addressOf(0).reinterpret(), len.toULong())
-            if (rc < 0) KicheException.check(rc.toInt())
+            if (rc < 0) KicheException.checkStrict(rc.toInt())
             return rc.toInt()
         }
     }
@@ -265,8 +265,9 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
     //region Close
     actual fun closeConnection(app: Boolean, err: Long, reason: ByteArray) {
         reason.usePinned { pinned ->
-            quiche_conn_close(conn(), app, err.toULong(),
+            val rc = quiche_conn_close(conn(), app, err.toULong(),
                 pinned.addressOf(0).reinterpret(), reason.size.toULong())
+            KicheException.checkStrict(rc)
         }
     }
 

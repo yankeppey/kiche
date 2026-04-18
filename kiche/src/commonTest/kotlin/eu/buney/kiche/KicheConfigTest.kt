@@ -22,7 +22,6 @@ class KicheConfigTest {
     fun testConfigVersionReserved() {
         KicheConfig(0xbabababa.toUInt()).close()
         KicheConfig(0x1a2a3a4a.toUInt()).close()
-        println("    config_version_reserved ... OK.")
     }
 
     //endregion
@@ -40,7 +39,6 @@ class KicheConfigTest {
                 config.setCcAlgorithm(algo)
             }
         }
-        println("    config_set_cc_algorithm_name ... OK.")
     }
 
     //endregion
@@ -52,7 +50,6 @@ class KicheConfigTest {
         val version = Kiche.quicheVersion()
         assertTrue(version.isNotEmpty(), "quiche version should not be empty")
         assertTrue(version.contains("."), "version should contain a dot: $version")
-        println("    quiche_version: $version ... OK.")
     }
 
     //endregion

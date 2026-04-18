@@ -28,7 +28,10 @@ class TestPipe(
             't'.code.toByte(), 'o'.code.toByte(), '1'.code.toByte()
         )
 
-        fun new(): TestPipe {
+        fun new(
+            dgramRecvQueueLen: Long = 100,
+            dgramSendQueueLen: Long = 100,
+        ): TestPipe {
             val certDir = quicheCertDir()
 
             val serverConfig = KicheConfig().apply {
@@ -43,7 +46,7 @@ class TestPipe(
                 setInitialMaxStreamsUni(100)
                 setMaxIdleTimeout(180_000)
                 verifyPeer(false)
-                enableDgram(true, 100, 100)
+                enableDgram(true, dgramRecvQueueLen, dgramSendQueueLen)
             }
 
             val clientConfig = KicheConfig().apply {
@@ -56,61 +59,19 @@ class TestPipe(
                 setInitialMaxStreamsUni(100)
                 setMaxIdleTimeout(180_000)
                 verifyPeer(false)
-                enableDgram(true, 100, 100)
+                enableDgram(true, dgramRecvQueueLen, dgramSendQueueLen)
             }
 
             val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
             val serverScid = ByteArray(16) { (it + 0x50).toByte() }
 
             val client = KicheConnection.connect(
-                "quic.tech", clientScid, CLIENT_ADDR, SERVER_ADDR, clientConfig
+                serverName = "quic.tech", scid = clientScid,
+                local = CLIENT_ADDR, peer = SERVER_ADDR, config = clientConfig,
             )
             val server = KicheConnection.accept(
-                serverScid, null, SERVER_ADDR, CLIENT_ADDR, serverConfig
-            )
-
-            return TestPipe(client, server, clientConfig, serverConfig)
-        }
-
-        fun newWithDgramConfig(recvQueueLen: Long, sendQueueLen: Long): TestPipe {
-            val certDir = quicheCertDir()
-
-            val serverConfig = KicheConfig().apply {
-                loadCertChainFromPemFile("$certDir/cert.crt")
-                loadPrivKeyFromPemFile("$certDir/cert.key")
-                setApplicationProtos(PROTOS)
-                setInitialMaxData(10_000_000)
-                setInitialMaxStreamDataBidiLocal(1_000_000)
-                setInitialMaxStreamDataBidiRemote(1_000_000)
-                setInitialMaxStreamDataUni(1_000_000)
-                setInitialMaxStreamsBidi(100)
-                setInitialMaxStreamsUni(100)
-                setMaxIdleTimeout(180_000)
-                verifyPeer(false)
-                enableDgram(true, recvQueueLen, sendQueueLen)
-            }
-
-            val clientConfig = KicheConfig().apply {
-                setApplicationProtos(PROTOS)
-                setInitialMaxData(10_000_000)
-                setInitialMaxStreamDataBidiLocal(1_000_000)
-                setInitialMaxStreamDataBidiRemote(1_000_000)
-                setInitialMaxStreamDataUni(1_000_000)
-                setInitialMaxStreamsBidi(100)
-                setInitialMaxStreamsUni(100)
-                setMaxIdleTimeout(180_000)
-                verifyPeer(false)
-                enableDgram(true, recvQueueLen, sendQueueLen)
-            }
-
-            val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
-            val serverScid = ByteArray(16) { (it + 0x50).toByte() }
-
-            val client = KicheConnection.connect(
-                "quic.tech", clientScid, CLIENT_ADDR, SERVER_ADDR, clientConfig
-            )
-            val server = KicheConnection.accept(
-                serverScid, null, SERVER_ADDR, CLIENT_ADDR, serverConfig
+                scid = serverScid, odcid = null,
+                local = SERVER_ADDR, peer = CLIENT_ADDR, config = serverConfig,
             )
 
             return TestPipe(client, server, clientConfig, serverConfig)
@@ -125,11 +86,9 @@ class TestPipe(
      */
     fun handshake() {
         while (!client.isEstablished || !server.isEstablished) {
-            // Client → Server
             val clientFlight = emitFlight(client)
             processFlight(server, clientFlight)
 
-            // Server → Client
             val serverFlight = emitFlight(server)
             processFlight(client, serverFlight)
         }

@@ -145,7 +145,7 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
 
     actual fun dgramSend(buf: ByteArray, len: Int): Int {
         val rc = nativeDgramSend(requireOpen(), buf, len)
-        if (rc < 0) KicheException.check(rc.toInt())
+        if (rc < 0) KicheException.checkStrict(rc.toInt())
         return rc.toInt()
     }
 
@@ -222,7 +222,7 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
 
     //region Close
     actual fun closeConnection(app: Boolean, err: Long, reason: ByteArray) {
-        nativeClose(requireOpen(), app, err, reason)
+        KicheException.checkStrict(nativeClose(requireOpen(), app, err, reason))
     }
 
     //endregion

@@ -15,5 +15,17 @@ class KicheException(
                 }
             }
         }
+
+        /**
+         * Like [check], but also throws on [KicheError.Done].
+         * Use for operations where Done means "rejected" (e.g., second close, queue full).
+         */
+        fun checkStrict(code: Int) {
+            if (code < 0) {
+                val error = KicheError.fromCode(code)
+                    ?: throw KicheException(KicheError.Done, "Unknown quiche error code: $code")
+                throw KicheException(error)
+            }
+        }
     }
 }
