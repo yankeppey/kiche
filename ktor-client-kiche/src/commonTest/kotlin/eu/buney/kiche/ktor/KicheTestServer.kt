@@ -33,7 +33,7 @@ class KicheTestServer {
     fun start(extraRoutes: (Routing.() -> Unit)? = null) {
         val certDir = quicheCertDir()
 
-        server = embeddedServer(KicheQuic, port = 0) {
+        server = embeddedServer(KicheQuic, host = "127.0.0.1", port = 0) {
             routing {
                 standardRoutes()
                 extraRoutes?.invoke(this)
