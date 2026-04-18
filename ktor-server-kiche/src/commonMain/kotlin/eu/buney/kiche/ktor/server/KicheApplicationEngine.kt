@@ -196,6 +196,8 @@ public class KicheApplicationEngine(
                     // New client from different port → reset
                     conn?.let { c ->
                         if (fromPort != connPeerPort) {
+                            // Wait for any in-flight response coroutines before freeing native objects
+                            joinResponseJobs()
                             h3Conn?.close()
                             c.close()
                             h3Config?.close()
@@ -230,13 +232,14 @@ public class KicheApplicationEngine(
                     // Poll H3 events and dispatch to Ktor pipeline
                     val h3 = h3Conn
                     if (h3 != null) {
-                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket, peerAddr)
+                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket, peerAddr, mutex)
                     }
 
                     sendSignal.trySend(Unit)
 
                     // Connection closed → cleanup
                     if (c.isClosed) {
+                        joinResponseJobs()
                         h3Conn?.close()
                         c.close()
                         h3Config?.close()
@@ -273,6 +276,18 @@ public class KicheApplicationEngine(
 
     private val requests = mutableMapOf<Long, RequestState>()
 
+    /** Outstanding response coroutines that hold references to the current h3/conn objects. */
+    private val responseJobs = mutableListOf<Job>()
+
+    /**
+     * Waits for all in-flight response coroutines to complete before freeing native objects.
+     * Must be called BEFORE closing h3Conn/conn to avoid use-after-free.
+     */
+    private suspend fun joinResponseJobs() {
+        responseJobs.forEach { it.join() }
+        responseJobs.clear()
+    }
+
     private fun pollAndDispatch(
         h3: KicheH3Connection,
         conn: KicheConnection,
@@ -281,6 +296,7 @@ public class KicheApplicationEngine(
         pendingResponses: MutableList<PendingResponse>,
         udpSocket: BoundDatagramSocket,
         peerSocketAddr: InetSocketAddress,
+        mutex: Mutex,
     ) {
         while (true) {
             val event = h3.poll(quicConn = conn) ?: break
@@ -316,7 +332,7 @@ public class KicheApplicationEngine(
 
                 KicheH3EventType.Finished -> {
                     val state = requests.remove(event.streamId) ?: continue
-                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses, udpSocket, peerSocketAddr)
+                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses, udpSocket, peerSocketAddr, mutex)
                 }
 
                 else -> {}
@@ -334,6 +350,7 @@ public class KicheApplicationEngine(
         pendingResponses: MutableList<PendingResponse>,
         udpSocket: BoundDatagramSocket,
         peerSocketAddr: InetSocketAddress,
+        mutex: Mutex,
     ) {
         val application = applicationProvider()
 
@@ -359,7 +376,7 @@ public class KicheApplicationEngine(
             localAddress = localSocketAddr,
         )
 
-        scope.launch {
+        val job = scope.launch {
             try {
                 pipeline.execute(call, Unit)
             } catch (e: Throwable) {
@@ -376,24 +393,39 @@ public class KicheApplicationEngine(
 
             val responseBody = responseData.body
             val sendBuf = ByteArray(65535)
-
             val hasBody = responseBody.isNotEmpty()
-            h3.sendResponse(
-                quicConn = conn, streamId = streamId,
-                headers = responseHeaders, fin = !hasBody,
-            )
+
+            // Send headers (and possibly small bodies) under the mutex
+            mutex.withLock {
+                h3.sendResponse(
+                    quicConn = conn, streamId = streamId,
+                    headers = responseHeaders, fin = !hasBody,
+                )
+                drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
+            }
+
+            // Send body in a loop, acquiring the mutex for each attempt.
+            // Between attempts we yield so the recv loop can process ACKs
+            // (which opens the QUIC flow control window for more data).
             if (hasBody) {
-                val sent = try {
-                    h3.sendBody(quicConn = conn, streamId = streamId, body = responseBody, fin = true)
-                } catch (_: KicheException) {
-                    0
-                }
-                if (sent < responseBody.size) {
-                    pendingResponses.add(PendingResponse(streamId, responseBody, offset = sent))
+                var offset = 0
+                while (offset < responseBody.size && !conn.isClosed) {
+                    mutex.withLock {
+                        val chunk = responseBody.copyOfRange(offset, responseBody.size)
+                        val sent = try {
+                            h3.sendBody(quicConn = conn, streamId = streamId, body = chunk, fin = true)
+                        } catch (_: KicheException) {
+                            0
+                        }
+                        if (sent > 0) offset += sent
+                        drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
+                    }
+                    if (offset < responseBody.size) yield()
                 }
             }
-            drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
         }
+        responseJobs.add(job)
+        job.invokeOnCompletion { responseJobs.remove(job) }
     }
 
     private companion object {

@@ -89,8 +89,10 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
     /**
      * Drives the QUIC handshake, sends an H3 request, and polls for the response.
      *
-     * All quiche calls within a single request are sequential (receive → process → send loop),
-     * so no additional synchronization is needed — each request owns its own connection.
+     * Body sending and response receiving happen in a single unified event loop so that
+     * QUIC flow control ACKs (which open the send window) are processed between body chunks.
+     * This supports streaming request bodies (ReadChannelContent, WriteChannelContent) in
+     * addition to ByteArrayContent.
      */
     private suspend fun executeH3Request(
         conn: KicheConnection,
@@ -120,29 +122,39 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         val h3Conn = KicheH3Connection(conn, h3Config)
 
         try {
-            // Build HTTP/3 request headers and resolve body bytes
+            // Build HTTP/3 request headers and resolve body channel
             val headers = buildH3Headers(data)
-            val bodyBytes = when (val body = data.body) {
-                is OutgoingContent.NoContent -> null
-                is OutgoingContent.ByteArrayContent -> body.bytes().takeIf { it.isNotEmpty() }
-                else -> error("Unsupported request body type: ${body::class.simpleName}. Only ByteArrayContent is supported.")
-            }
+            val bodyChannel = data.body.toReadChannel(CoroutineScope(callContext))
 
-            val streamId = h3Conn.sendRequest(quicConn = conn, headers = headers, fin = bodyBytes == null)
+            val streamId = h3Conn.sendRequest(
+                quicConn = conn, headers = headers, fin = bodyChannel == null,
+            )
 
-            if (bodyBytes != null) {
-                h3Conn.sendBody(quicConn = conn, streamId = streamId, body = bodyBytes, fin = true)
-            }
+            // Body sending state
+            var bodyFinished = bodyChannel == null
+            var pendingBody: ByteArray? = null
+            var pendingOffset = 0
 
-            drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
-
-            // Poll for response
+            // Response receiving state
             var responseHeaders: Headers = Headers.Empty
             var responseStatus = HttpStatusCode.OK
             val responseBodyParts = mutableListOf<ByteArray>()
-            var finished = false
+            var responseFinished = false
 
-            while (!finished && !conn.isClosed) {
+            while (!responseFinished && !conn.isClosed) {
+                // Try to push body data (non-blocking: only reads what's already buffered)
+                if (!bodyFinished) {
+                    val result = trySendBodyData(
+                        h3Conn, conn, streamId, bodyChannel!!,
+                        pendingBody, pendingOffset,
+                    )
+                    bodyFinished = result.finished
+                    pendingBody = result.pending
+                    pendingOffset = result.offset
+                }
+                drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
+
+                // Wait for incoming QUIC packet (or timeout for timer-driven events)
                 val dgram = withTimeoutOrNull(
                     conn.timeoutAsMillis().coerceIn(1, 1000)
                 ) {
@@ -184,13 +196,25 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                         }
 
                         KicheH3EventType.Finished -> {
-                            if (event.streamId == streamId) finished = true
+                            if (event.streamId == streamId) responseFinished = true
                         }
 
                         KicheH3EventType.GoAway,
                         KicheH3EventType.Reset,
                         KicheH3EventType.PriorityUpdate -> { /* ignore for now */ }
                     }
+                }
+
+                // After processing ACKs, flow control window may have opened — retry body send
+                if (!bodyFinished) {
+                    val result = trySendBodyData(
+                        h3Conn, conn, streamId, bodyChannel!!,
+                        pendingBody, pendingOffset,
+                    )
+                    bodyFinished = result.finished
+                    pendingBody = result.pending
+                    pendingOffset = result.offset
+                    drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
                 }
             }
 
@@ -230,6 +254,124 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         /** h3 ALPN token encoded as quiche expects: length-prefixed. */
         val H3_ALPN: ByteArray = byteArrayOf(2, 'h'.code.toByte(), '3'.code.toByte())
     }
+}
+
+/**
+ * Result of a non-blocking body send attempt, carrying the mutable state
+ * back to the caller to avoid allocating a state holder object per request.
+ */
+private class BodySendResult(
+    val finished: Boolean,
+    val pending: ByteArray?,
+    val offset: Int,
+)
+
+/**
+ * Attempts to send request body data without suspending on the body channel.
+ *
+ * Reads from [bodyChannel] only if bytes are already buffered ([availableForRead] > 0),
+ * then pushes as much as quiche will accept via [KicheH3Connection.sendBody].
+ * Partial writes (flow control backpressure) are tracked via [pendingBody]/[pendingOffset].
+ */
+private suspend fun trySendBodyData(
+    h3Conn: KicheH3Connection,
+    conn: KicheConnection,
+    streamId: Long,
+    bodyChannel: ByteReadChannel,
+    pendingBody: ByteArray?,
+    pendingOffset: Int,
+): BodySendResult {
+    var curPending = pendingBody
+    var curOffset = pendingOffset
+
+    // availableForRead can throw if the channel was closed with an error (e.g. writer exception).
+    // In that case, treat it as channel closed with 0 bytes available.
+    val available = try {
+        bodyChannel.availableForRead
+    } catch (_: Throwable) {
+        0
+    }
+
+    // Fill pending buffer from channel if empty
+    if (curPending == null) {
+        if (available > 0) {
+            val buf = ByteArray(MAX_BODY_CHUNK)
+            val n = bodyChannel.readAvailable(buf, 0, buf.size)
+            if (n > 0) {
+                curPending = buf.copyOf(n)
+                curOffset = 0
+            }
+        }
+
+        // If still nothing pending and channel is done, send fin
+        if (curPending == null && bodyChannel.isClosedForRead) {
+            bodyChannel.closedCause?.let { throw it }
+            try {
+                h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
+            } catch (_: KicheException) {
+                // Flow control blocked — retry next iteration
+                return BodySendResult(finished = false, pending = null, offset = 0)
+            }
+            return BodySendResult(finished = true, pending = null, offset = 0)
+        }
+    }
+
+    // Try to send pending data
+    if (curPending != null) {
+        val availableAfterSend = try {
+            bodyChannel.availableForRead
+        } catch (_: Throwable) {
+            0
+        }
+        val isLast = bodyChannel.isClosedForRead && availableAfterSend == 0
+
+        val chunk = if (curOffset == 0) curPending else curPending.copyOfRange(curOffset, curPending.size)
+
+        val sent = try {
+            h3Conn.sendBody(conn, streamId, chunk, fin = isLast)
+        } catch (_: KicheException) {
+            0
+        }
+
+        if (sent > 0) {
+            curOffset += sent
+            if (curOffset >= curPending.size) {
+                curPending = null
+                curOffset = 0
+                if (isLast) return BodySendResult(finished = true, pending = null, offset = 0)
+            }
+        }
+    }
+
+    return BodySendResult(finished = false, pending = curPending, offset = curOffset)
+}
+
+private const val MAX_BODY_CHUNK = 65535
+
+/**
+ * Normalizes any [OutgoingContent] to a [ByteReadChannel], or null for no-body requests.
+ * Mirrors CIO's `processOutgoingContent` but produces a read channel instead of writing
+ * to a TCP stream, since quiche requires explicit [KicheH3Connection.sendBody] calls.
+ */
+private fun OutgoingContent.toReadChannel(scope: CoroutineScope): ByteReadChannel? = when (this) {
+    is OutgoingContent.NoContent -> null
+
+    is OutgoingContent.ByteArrayContent -> {
+        val bytes = bytes()
+        if (bytes.isEmpty()) null else ByteReadChannel(bytes)
+    }
+
+    is OutgoingContent.ReadChannelContent -> readFrom()
+
+    is OutgoingContent.WriteChannelContent -> {
+        val content = this
+        scope.writer { content.writeTo(channel) }.channel
+    }
+
+    is OutgoingContent.ContentWrapper -> delegate().toReadChannel(scope)
+
+    is OutgoingContent.ProtocolUpgrade ->
+        error("Protocol upgrade is not supported by the Kiche engine")
 }
 
 private fun buildH3Headers(data: HttpRequestData): List<KicheH3Header> {
