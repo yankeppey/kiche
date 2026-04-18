@@ -464,6 +464,112 @@ class KicheConnectionTest {
 
     //endregion
 
+    //region tests.rs:stream_limit_update_bidi (line 4961)
+
+    /**
+     * Ported from tests.rs:stream_limit_update_bidi()
+     * With max_streams_bidi=3, the client can open 3 bidi streams. After both
+     * sides close all 3 and the server reads the data, the server sends
+     * MAX_STREAMS allowing the client to open 3 more. A 4th then fails
+     * with StreamLimit.
+     */
+    @Test
+    fun testStreamLimitUpdateBidi() {
+        TestPipe.newWithSmallLimits().use { pipe ->
+            pipe.handshake()
+
+            // Client opens 3 bidi streams (0, 4, 8) and sends data with fin.
+            pipe.client.streamSend(0, "a".encodeToByteArray(), 1, fin = false)
+            pipe.advance()
+            pipe.client.streamSend(4, "a".encodeToByteArray(), 1, fin = false)
+            pipe.advance()
+            pipe.client.streamSend(4, "b".encodeToByteArray(), 1, fin = true)
+            pipe.advance()
+            pipe.client.streamSend(0, "b".encodeToByteArray(), 1, fin = true)
+            pipe.advance()
+
+            // Server reads all stream data (consuming it frees the stream slots).
+            val buf = ByteArray(1024)
+            pipe.server.streamRecv(0, buf, buf.size)
+            pipe.server.streamRecv(4, buf, buf.size)
+            pipe.advance()
+
+            // Server responds and closes both streams.
+            pipe.server.streamSend(0, "a".encodeToByteArray(), 1, fin = false)
+            pipe.advance()
+            pipe.server.streamSend(4, "a".encodeToByteArray(), 1, fin = false)
+            pipe.advance()
+            pipe.server.streamSend(4, "b".encodeToByteArray(), 1, fin = true)
+            pipe.advance()
+            pipe.server.streamSend(0, "b".encodeToByteArray(), 1, fin = true)
+
+            // Server sends MAX_STREAMS in this advance.
+            pipe.advance()
+
+            // Client can now open 3 new bidi streams (8, 12, 16).
+            assertEquals(1, pipe.client.streamSend(8, "a".encodeToByteArray(), 1, fin = false))
+            pipe.advance()
+            assertEquals(1, pipe.client.streamSend(12, "a".encodeToByteArray(), 1, fin = false))
+            pipe.advance()
+            assertEquals(1, pipe.client.streamSend(16, "a".encodeToByteArray(), 1, fin = false))
+            pipe.advance()
+
+            // 4th stream exceeds limit.
+            assertFailsWith<KicheException> {
+                pipe.client.streamSend(20, "a".encodeToByteArray(), 1, fin = false)
+            }.also { assertEquals(KicheError.StreamLimit, it.error) }
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:stream_limit_update_uni (line 5040)
+
+    /**
+     * Ported from tests.rs:stream_limit_update_uni()
+     * Same as bidi variant but for unidirectional streams.
+     * Client-initiated uni stream IDs: 2, 6, 10, 14, 18, 22, ...
+     */
+    @Test
+    fun testStreamLimitUpdateUni() {
+        TestPipe.newWithSmallLimits().use { pipe ->
+            pipe.handshake()
+
+            // Client opens 3 uni streams (2, 6) and sends data with fin.
+            pipe.client.streamSend(2, "a".encodeToByteArray(), 1, fin = false)
+            pipe.advance()
+            pipe.client.streamSend(6, "a".encodeToByteArray(), 1, fin = false)
+            pipe.advance()
+            pipe.client.streamSend(6, "b".encodeToByteArray(), 1, fin = true)
+            pipe.advance()
+            pipe.client.streamSend(2, "b".encodeToByteArray(), 1, fin = true)
+            pipe.advance()
+
+            // Server reads all stream data.
+            val buf = ByteArray(1024)
+            pipe.server.streamRecv(2, buf, buf.size)
+            pipe.server.streamRecv(6, buf, buf.size)
+
+            // Server sends MAX_STREAMS.
+            pipe.advance()
+
+            // Client can now open 3 new uni streams (10, 14, 18).
+            assertEquals(1, pipe.client.streamSend(10, "a".encodeToByteArray(), 1, fin = false))
+            pipe.advance()
+            assertEquals(1, pipe.client.streamSend(14, "a".encodeToByteArray(), 1, fin = false))
+            pipe.advance()
+            assertEquals(1, pipe.client.streamSend(18, "a".encodeToByteArray(), 1, fin = false))
+            pipe.advance()
+
+            // 4th stream exceeds limit.
+            assertFailsWith<KicheException> {
+                pipe.client.streamSend(22, "a".encodeToByteArray(), 1, fin = false)
+            }.also { assertEquals(KicheError.StreamLimit, it.error) }
+        }
+    }
+
+    //endregion
+
     //region tests.rs:local_error (line 8940)
 
     /**
