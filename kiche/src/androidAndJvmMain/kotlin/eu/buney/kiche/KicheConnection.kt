@@ -39,8 +39,32 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
         }
 
         @JvmStatic
+        actual fun accept(
+            scid: ByteArray,
+            odcid: ByteArray?,
+            local: KicheAddress,
+            peer: KicheAddress,
+            config: KicheConfig,
+        ): KicheConnection {
+            KicheLoader.load()
+            val h = nativeAccept(scid, odcid,
+                local.ip, local.port, peer.ip, peer.port,
+                config.getHandle())
+            if (h == 0L) error("Failed to accept QUIC connection")
+            return KicheConnection(h)
+        }
+
+        @JvmStatic
         private external fun nativeConnect(
             serverName: String, scid: ByteArray,
+            localIp: ByteArray, localPort: Int,
+            peerIp: ByteArray, peerPort: Int,
+            configHandle: Long
+        ): Long
+
+        @JvmStatic
+        private external fun nativeAccept(
+            scid: ByteArray, odcid: ByteArray?,
             localIp: ByteArray, localPort: Int,
             peerIp: ByteArray, peerPort: Int,
             configHandle: Long

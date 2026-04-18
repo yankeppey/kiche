@@ -38,6 +38,37 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                 KicheConnection(connPtr)
             }
         }
+
+        actual fun accept(
+            scid: ByteArray,
+            odcid: ByteArray?,
+            local: KicheAddress,
+            peer: KicheAddress,
+            config: KicheConfig,
+        ): KicheConnection = memScoped {
+            val localSs = alloc<sockaddr_storage>()
+            val localLen = fillSockaddr(localSs.ptr, local)
+            val peerSs = alloc<sockaddr_storage>()
+            val peerLen = fillSockaddr(peerSs.ptr, peer)
+
+            scid.usePinned { pinnedScid ->
+                val odcidPtr = odcid?.let { it.usePinned { p -> p.addressOf(0).reinterpret<UByteVar>() } }
+                val odcidLen = odcid?.size?.toULong() ?: 0u
+
+                val connPtr = quiche_accept(
+                    pinnedScid.addressOf(0).reinterpret(),
+                    scid.size.toULong(),
+                    odcidPtr,
+                    odcidLen,
+                    localSs.ptr.reinterpret(),
+                    localLen,
+                    peerSs.ptr.reinterpret(),
+                    peerLen,
+                    config.ptr?.reinterpret()
+                ) ?: error("Failed to accept QUIC connection")
+                KicheConnection(connPtr)
+            }
+        }
     }
 
     //region Core I/O

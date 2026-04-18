@@ -9,6 +9,14 @@ expect class KicheConnection : AutoCloseable {
             peer: KicheAddress,
             config: KicheConfig,
         ): KicheConnection
+
+        fun accept(
+            scid: ByteArray,
+            odcid: ByteArray?,
+            local: KicheAddress,
+            peer: KicheAddress,
+            config: KicheConfig,
+        ): KicheConnection
     }
 
     //region Core I/O

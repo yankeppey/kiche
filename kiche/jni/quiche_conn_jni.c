@@ -38,6 +38,40 @@ JNI_FN(PKG, KicheConnection, nativeConnect)(JNIEnv *env, jclass clazz,
     return (jlong)(intptr_t)conn;
 }
 
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeAccept)(JNIEnv *env, jclass clazz,
+        jbyteArray scid, jbyteArray odcid,
+        jbyteArray localIp, jint localPort,
+        jbyteArray peerIp, jint peerPort,
+        jlong configHandle) {
+    jbyte *scid_buf = (*env)->GetByteArrayElements(env, scid, NULL);
+    jsize scid_len = (*env)->GetArrayLength(env, scid);
+
+    const uint8_t *odcid_buf = NULL;
+    jsize odcid_len = 0;
+    if (odcid != NULL) {
+        odcid_buf = (const uint8_t *)(*env)->GetByteArrayElements(env, odcid, NULL);
+        odcid_len = (*env)->GetArrayLength(env, odcid);
+    }
+
+    struct sockaddr_storage local_ss, peer_ss;
+    socklen_t local_len = fill_sockaddr_from_address(env, &local_ss, localIp, localPort);
+    socklen_t peer_len = fill_sockaddr_from_address(env, &peer_ss, peerIp, peerPort);
+
+    quiche_conn *conn = quiche_accept(
+        (const uint8_t *)scid_buf, (size_t)scid_len,
+        odcid_buf, (size_t)odcid_len,
+        (const struct sockaddr *)&local_ss, local_len,
+        (const struct sockaddr *)&peer_ss, peer_len,
+        (quiche_config *)(intptr_t)configHandle);
+
+    if (odcid != NULL) {
+        (*env)->ReleaseByteArrayElements(env, odcid, (jbyte *)odcid_buf, JNI_ABORT);
+    }
+    (*env)->ReleaseByteArrayElements(env, scid, scid_buf, JNI_ABORT);
+    return (jlong)(intptr_t)conn;
+}
+
 JNIEXPORT void JNICALL
 JNI_FN(PKG, KicheConnection, nativeFree)(JNIEnv *env, jobject self, jlong handle) {
     quiche_conn_free(CONN(handle));
