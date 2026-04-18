@@ -35,6 +35,8 @@ expect class KicheConfig(version: UInt = QUICHE_PROTOCOL_VERSION) : AutoCloseabl
     fun setActiveConnectionIdLimit(v: Long)
     fun setStatelessResetToken(token: ByteArray)
     fun setDisableDcidReuse(disabled: Boolean)
+    fun setTicketKey(key: ByteArray)
+    fun setEnableCubicIdleRestartFix(enabled: Boolean)
     override fun close()
 }
 

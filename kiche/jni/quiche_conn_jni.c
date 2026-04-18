@@ -379,7 +379,152 @@ JNI_FN(PKG, KicheConnection, nativeClose)(JNIEnv *env, jobject self, jlong handl
     return rc;
 }
 
+// --- Send ACK eliciting ---
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeSendAckEliciting)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_send_ack_eliciting(CONN(handle));
+}
+
+// --- Stream priority ---
+
+JNIEXPORT jint JNICALL
+JNI_FN(PKG, KicheConnection, nativeStreamPriority)(JNIEnv *env, jobject self, jlong handle,
+        jlong streamId, jint urgency, jboolean incremental) {
+    return quiche_conn_stream_priority(CONN(handle), (uint64_t)streamId,
+        (uint8_t)urgency, incremental);
+}
+
+// --- Datagram extras ---
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeDgramRecvFrontLen)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_dgram_recv_front_len(CONN(handle));
+}
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeDgramRecvQueueByteSize)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_dgram_recv_queue_byte_size(CONN(handle));
+}
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeDgramSendQueueByteSize)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_dgram_send_queue_byte_size(CONN(handle));
+}
+
+// --- Connection ID management ---
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeRetiredScids)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_retired_scids(CONN(handle));
+}
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeAvailableDcids)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_available_dcids(CONN(handle));
+}
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeScidsLeft)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_scids_left(CONN(handle));
+}
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeActiveScids)(JNIEnv *env, jobject self, jlong handle) {
+    return (jlong)quiche_conn_active_scids(CONN(handle));
+}
+
+JNIEXPORT jlong JNICALL
+JNI_FN(PKG, KicheConnection, nativeNewScid)(JNIEnv *env, jobject self, jlong handle,
+        jbyteArray scid, jbyteArray resetToken, jboolean retireIfNeeded) {
+    jbyte *scid_buf = (*env)->GetByteArrayElements(env, scid, NULL);
+    jsize scid_len = (*env)->GetArrayLength(env, scid);
+    jbyte *token_buf = (*env)->GetByteArrayElements(env, resetToken, NULL);
+    uint64_t seq = 0;
+    int rc = quiche_conn_new_scid(CONN(handle),
+        (const uint8_t *)scid_buf, (size_t)scid_len,
+        (const uint8_t *)token_buf, retireIfNeeded, &seq);
+    (*env)->ReleaseByteArrayElements(env, resetToken, token_buf, JNI_ABORT);
+    (*env)->ReleaseByteArrayElements(env, scid, scid_buf, JNI_ABORT);
+    if (rc < 0) return (jlong)rc; // error code
+    return (jlong)seq;
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(PKG, KicheConnection, nativeRetireDcid)(JNIEnv *env, jobject self, jlong handle, jlong dcidSeq) {
+    return quiche_conn_retire_dcid(CONN(handle), (uint64_t)dcidSeq);
+}
+
+JNIEXPORT jbyteArray JNICALL
+JNI_FN(PKG, KicheConnection, nativeRetiredScidNext)(JNIEnv *env, jobject self, jlong handle) {
+    const uint8_t *out;
+    size_t out_len;
+    if (!quiche_conn_retired_scid_next(CONN(handle), &out, &out_len)) return NULL;
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)out_len);
+    (*env)->SetByteArrayRegion(env, result, 0, (jsize)out_len, (const jbyte *)out);
+    return result;
+}
+
+// --- TLS / session ---
+
+JNIEXPORT jint JNICALL
+JNI_FN(PKG, KicheConnection, nativeSetSession)(JNIEnv *env, jobject self, jlong handle, jbyteArray session) {
+    jbyte *buf = (*env)->GetByteArrayElements(env, session, NULL);
+    jsize len = (*env)->GetArrayLength(env, session);
+    int rc = quiche_conn_set_session(CONN(handle), (const uint8_t *)buf, (size_t)len);
+    (*env)->ReleaseByteArrayElements(env, session, buf, JNI_ABORT);
+    return rc;
+}
+
+JNIEXPORT jbyteArray JNICALL
+JNI_FN(PKG, KicheConnection, nativeSession)(JNIEnv *env, jobject self, jlong handle) {
+    const uint8_t *out;
+    size_t out_len;
+    quiche_conn_session(CONN(handle), &out, &out_len);
+    if (out_len == 0) return NULL;
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)out_len);
+    (*env)->SetByteArrayRegion(env, result, 0, (jsize)out_len, (const jbyte *)out);
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+JNI_FN(PKG, KicheConnection, nativeSetMaxIdleTimeout)(JNIEnv *env, jobject self, jlong handle, jlong v) {
+    return quiche_conn_set_max_idle_timeout(CONN(handle), (uint64_t)v);
+}
+
+JNIEXPORT jboolean JNICALL
+JNI_FN(PKG, KicheConnection, nativeSetKeylogPath)(JNIEnv *env, jobject self, jlong handle, jstring path) {
+    const char *c_path = (*env)->GetStringUTFChars(env, path, NULL);
+    bool rc = quiche_conn_set_keylog_path(CONN(handle), c_path);
+    (*env)->ReleaseStringUTFChars(env, path, c_path);
+    return rc;
+}
+
 // --- Info (byte array outputs) ---
+
+JNIEXPORT jbyteArray JNICALL
+JNI_FN(PKG, KicheConnection, nativeTraceId)(JNIEnv *env, jobject self, jlong handle) {
+    const uint8_t *out;
+    size_t out_len;
+    quiche_conn_trace_id(CONN(handle), &out, &out_len);
+    if (out_len == 0) return NULL;
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)out_len);
+    (*env)->SetByteArrayRegion(env, result, 0, (jsize)out_len, (const jbyte *)out);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL
+JNI_FN(PKG, KicheConnection, nativeServerName)(JNIEnv *env, jobject self, jlong handle) {
+    const uint8_t *out;
+    size_t out_len;
+    quiche_conn_server_name(CONN(handle), &out, &out_len);
+    if (out_len == 0) return NULL;
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)out_len);
+    (*env)->SetByteArrayRegion(env, result, 0, (jsize)out_len, (const jbyte *)out);
+    return result;
+}
+
+// --- Info (byte array outputs, continued) ---
 
 JNIEXPORT jbyteArray JNICALL
 JNI_FN(PKG, KicheConnection, nativeApplicationProto)(JNIEnv *env, jobject self, jlong handle) {
@@ -501,6 +646,50 @@ JNI_FN(PKG, KicheConnection, nativeStats)(JNIEnv *env, jobject self, jlong handl
         (jlong)stats.reset_stream_count_remote, (jlong)stats.stopped_stream_count_remote,
     };
     (*env)->SetLongArrayRegion(env, result, 0, 17, vals);
+    return result;
+}
+
+// --- Path stats ---
+
+JNIEXPORT jlongArray JNICALL
+JNI_FN(PKG, KicheConnection, nativePathStats)(JNIEnv *env, jobject self, jlong handle, jlong idx) {
+    quiche_path_stats ps;
+    int rc = quiche_conn_path_stats(CONN(handle), (size_t)idx, &ps);
+    if (rc != 0) return NULL;
+
+    uint8_t local_ip[16], peer_ip[16];
+    int local_ip_len, peer_ip_len, local_port, peer_port;
+    extract_sockaddr(&ps.local_addr, local_ip, &local_ip_len, &local_port);
+    extract_sockaddr(&ps.peer_addr, peer_ip, &peer_ip_len, &peer_port);
+
+    // Store address IPs in fields
+    static jfieldID fLocalIp = NULL, fPeerIp = NULL;
+    if (!fLocalIp) {
+        jclass cls = (*env)->GetObjectClass(env, self);
+        fLocalIp = (*env)->GetFieldID(env, cls, "lastPathStatsLocalIp", "[B");
+        fPeerIp = (*env)->GetFieldID(env, cls, "lastPathStatsPeerIp", "[B");
+    }
+    jbyteArray localIpArr = (*env)->NewByteArray(env, local_ip_len);
+    (*env)->SetByteArrayRegion(env, localIpArr, 0, local_ip_len, (const jbyte *)local_ip);
+    (*env)->SetObjectField(env, self, fLocalIp, localIpArr);
+
+    jbyteArray peerIpArr = (*env)->NewByteArray(env, peer_ip_len);
+    (*env)->SetByteArrayRegion(env, peerIpArr, 0, peer_ip_len, (const jbyte *)peer_ip);
+    (*env)->SetObjectField(env, self, fPeerIp, peerIpArr);
+
+    // Pack: [active, recv, sent, lost, retrans, rtt, minRtt, rttvar, cwnd,
+    //        sentBytes, recvBytes, lostBytes, streamRetransBytes, pmtu, deliveryRate,
+    //        localIpLen, localPort, peerIpLen, peerPort]
+    jlongArray result = (*env)->NewLongArray(env, 19);
+    jlong vals[19] = {
+        ps.active ? 1L : 0L,
+        (jlong)ps.recv, (jlong)ps.sent, (jlong)ps.lost, (jlong)ps.retrans,
+        (jlong)ps.rtt, (jlong)ps.min_rtt, (jlong)ps.rttvar, (jlong)ps.cwnd,
+        (jlong)ps.sent_bytes, (jlong)ps.recv_bytes, (jlong)ps.lost_bytes,
+        (jlong)ps.stream_retrans_bytes, (jlong)ps.pmtu, (jlong)ps.delivery_rate,
+        (jlong)local_ip_len, (jlong)local_port, (jlong)peer_ip_len, (jlong)peer_port,
+    };
+    (*env)->SetLongArrayRegion(env, result, 0, 19, vals);
     return result;
 }
 

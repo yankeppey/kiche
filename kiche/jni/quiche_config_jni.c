@@ -217,3 +217,17 @@ JNIEXPORT void JNICALL
 JNI_FN(PKG, KicheConfig, nativeSetDisableDcidReuse)(JNIEnv *env, jobject self, jlong handle, jboolean v) {
     quiche_config_set_disable_dcid_reuse(CFG(handle), v);
 }
+
+JNIEXPORT jint JNICALL
+JNI_FN(PKG, KicheConfig, nativeSetTicketKey)(JNIEnv *env, jobject self, jlong handle, jbyteArray key) {
+    jbyte *buf = (*env)->GetByteArrayElements(env, key, NULL);
+    jsize len = (*env)->GetArrayLength(env, key);
+    int rc = quiche_config_set_ticket_key(CFG(handle), (const uint8_t *)buf, (size_t)len);
+    (*env)->ReleaseByteArrayElements(env, key, buf, JNI_ABORT);
+    return rc;
+}
+
+JNIEXPORT void JNICALL
+JNI_FN(PKG, KicheConfig, nativeSetEnableCubicIdleRestartFix)(JNIEnv *env, jobject self, jlong handle, jboolean v) {
+    quiche_config_set_enable_cubic_idle_restart_fix(CFG(handle), v);
+}

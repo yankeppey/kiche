@@ -122,6 +122,17 @@ actual class KicheConfig actual constructor(version: UInt) : AutoCloseable {
     actual fun setDisableDcidReuse(disabled: Boolean) =
         quiche_config_set_disable_dcid_reuse(cfg(), disabled)
 
+    actual fun setTicketKey(key: ByteArray) {
+        key.usePinned { pinned ->
+            KicheException.check(
+                quiche_config_set_ticket_key(cfg(), pinned.addressOf(0).reinterpret(), key.size.toULong())
+            )
+        }
+    }
+
+    actual fun setEnableCubicIdleRestartFix(enabled: Boolean) =
+        quiche_config_set_enable_cubic_idle_restart_fix(cfg(), enabled)
+
     actual override fun close() {
         ptr?.let {
             quiche_config_free(it.reinterpret())

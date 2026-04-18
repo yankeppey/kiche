@@ -107,6 +107,8 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
         }
     }
 
+    actual fun sendAckEliciting(): Long = quiche_conn_send_ack_eliciting(conn())
+
     //endregion
 
     //region Streams
@@ -155,6 +157,10 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
 
     actual fun streamFinished(streamId: Long): Boolean = quiche_conn_stream_finished(conn(), streamId.toULong())
 
+    actual fun streamPriority(streamId: Long, urgency: Int, incremental: Boolean) {
+        KicheException.check(quiche_conn_stream_priority(conn(), streamId.toULong(), urgency.toUByte(), incremental))
+    }
+
     //endregion
 
     //region Datagrams
@@ -176,8 +182,11 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
     }
 
     actual fun dgramMaxWritableLen(): Long = quiche_conn_dgram_max_writable_len(conn())
+    actual fun dgramRecvFrontLen(): Long = quiche_conn_dgram_recv_front_len(conn())
     actual fun dgramRecvQueueLen(): Long = quiche_conn_dgram_recv_queue_len(conn())
+    actual fun dgramRecvQueueByteSize(): Long = quiche_conn_dgram_recv_queue_byte_size(conn())
     actual fun dgramSendQueueLen(): Long = quiche_conn_dgram_send_queue_len(conn())
+    actual fun dgramSendQueueByteSize(): Long = quiche_conn_dgram_send_queue_byte_size(conn())
     actual fun isDgramSendQueueFull(): Boolean = quiche_conn_is_dgram_send_queue_full(conn())
     actual fun isDgramRecvQueueFull(): Boolean = quiche_conn_is_dgram_recv_queue_full(conn())
 
@@ -206,6 +215,53 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
 
     //endregion
 
+    //region Connection ID management
+    actual fun retiredScids(): Long = quiche_conn_retired_scids(conn()).toLong()
+    actual fun availableDcids(): Long = quiche_conn_available_dcids(conn()).toLong()
+    actual fun scidsLeft(): Long = quiche_conn_scids_left(conn()).toLong()
+    actual fun activeScids(): Long = quiche_conn_active_scids(conn()).toLong()
+
+    actual fun newScid(scid: ByteArray, resetToken: ByteArray, retireIfNeeded: Boolean): Long = memScoped {
+        val seq = alloc<ULongVar>()
+        scid.usePinned { pinnedScid ->
+            resetToken.usePinned { pinnedToken ->
+                KicheException.check(quiche_conn_new_scid(conn(),
+                    pinnedScid.addressOf(0).reinterpret(), scid.size.toULong(),
+                    pinnedToken.addressOf(0).reinterpret(), retireIfNeeded, seq.ptr))
+            }
+        }
+        seq.value.toLong()
+    }
+
+    actual fun retireDcid(dcidSeq: Long) {
+        KicheException.check(quiche_conn_retire_dcid(conn(), dcidSeq.toULong()))
+    }
+
+    actual fun retiredScidNext(): ByteArray? = readBytesOut { out, outLen ->
+        quiche_conn_retired_scid_next(conn(), out, outLen)
+    }
+    //endregion
+
+    //region TLS / session
+    actual fun setSession(session: ByteArray) {
+        session.usePinned { pinned ->
+            KicheException.check(quiche_conn_set_session(conn(),
+                pinned.addressOf(0).reinterpret(), session.size.toULong()))
+        }
+    }
+
+    actual fun session(): ByteArray? = readBytesOut { out, outLen ->
+        quiche_conn_session(conn(), out, outLen)
+    }
+
+    actual fun setMaxIdleTimeout(v: Long) {
+        KicheException.check(quiche_conn_set_max_idle_timeout(conn(), v.toULong()))
+    }
+
+    actual fun setKeylogPath(path: String): Boolean = quiche_conn_set_keylog_path(conn(), path)
+
+    //endregion
+
     //region Close
     actual fun closeConnection(app: Boolean, err: Long, reason: ByteArray) {
         reason.usePinned { pinned ->
@@ -231,6 +287,14 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
 
     actual fun destinationId(): ByteArray? = readBytesOut { out, outLen ->
         quiche_conn_destination_id(conn(), out, outLen)
+    }
+
+    actual fun traceId(): ByteArray? = readBytesOut { out, outLen ->
+        quiche_conn_trace_id(conn(), out, outLen)
+    }
+
+    actual fun serverName(): ByteArray? = readBytesOut { out, outLen ->
+        quiche_conn_server_name(conn(), out, outLen)
     }
 
     actual fun peerError(): KicheConnectionError? = memScoped {
@@ -267,6 +331,24 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
             s.dgram_recv.toLong(), s.dgram_sent.toLong(), s.paths_count.toLong(),
             s.reset_stream_count_local.toLong(), s.stopped_stream_count_local.toLong(),
             s.reset_stream_count_remote.toLong(), s.stopped_stream_count_remote.toLong(),
+        )
+    }
+
+    actual fun pathStats(idx: Long): KichePathStats? = memScoped {
+        val ps = alloc<quiche_path_stats>()
+        val rc = quiche_conn_path_stats(conn(), idx.toULong(), ps.ptr)
+        if (rc != 0) return null
+        KichePathStats(
+            localAddr = extractSockaddr(ps.local_addr.ptr),
+            peerAddr = extractSockaddr(ps.peer_addr.ptr),
+            active = ps.active,
+            recv = ps.recv.toLong(), sent = ps.sent.toLong(),
+            lost = ps.lost.toLong(), retrans = ps.retrans.toLong(),
+            rtt = ps.rtt.toLong(), minRtt = ps.min_rtt.toLong(), rttvar = ps.rttvar.toLong(),
+            cwnd = ps.cwnd.toLong(), sentBytes = ps.sent_bytes.toLong(),
+            recvBytes = ps.recv_bytes.toLong(), lostBytes = ps.lost_bytes.toLong(),
+            streamRetransBytes = ps.stream_retrans_bytes.toLong(),
+            pmtu = ps.pmtu.toLong(), deliveryRate = ps.delivery_rate.toLong(),
         )
     }
 

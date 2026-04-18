@@ -56,6 +56,26 @@ data class KicheStats(
     val stoppedStreamCountRemote: Long,
 )
 
+data class KichePathStats(
+    val localAddr: KicheAddress,
+    val peerAddr: KicheAddress,
+    val active: Boolean,
+    val recv: Long,
+    val sent: Long,
+    val lost: Long,
+    val retrans: Long,
+    val rtt: Long,
+    val minRtt: Long,
+    val rttvar: Long,
+    val cwnd: Long,
+    val sentBytes: Long,
+    val recvBytes: Long,
+    val lostBytes: Long,
+    val streamRetransBytes: Long,
+    val pmtu: Long,
+    val deliveryRate: Long,
+)
+
 data class KicheTransportParams(
     val peerMaxIdleTimeout: Long,
     val peerMaxUdpPayloadSize: Long,

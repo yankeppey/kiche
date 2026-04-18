@@ -186,6 +186,43 @@ JNI_FN(PKG, KicheH3Connection, nativeRecvBody)(JNIEnv *env, jobject self,
 }
 
 JNIEXPORT jint JNICALL
+JNI_FN(PKG, KicheH3Connection, nativeSendResponse)(JNIEnv *env, jobject self,
+        jlong handle, jlong quicConn, jlong streamId,
+        jobjectArray names, jobjectArray values, jboolean fin) {
+    jsize count = (*env)->GetArrayLength(env, names);
+    quiche_h3_header *hdrs = (quiche_h3_header *)calloc(count, sizeof(quiche_h3_header));
+    jbyte **name_bufs = (jbyte **)calloc(count, sizeof(jbyte *));
+    jbyte **value_bufs = (jbyte **)calloc(count, sizeof(jbyte *));
+    jbyteArray *name_arrs = (jbyteArray *)calloc(count, sizeof(jbyteArray));
+    jbyteArray *value_arrs = (jbyteArray *)calloc(count, sizeof(jbyteArray));
+
+    for (jsize i = 0; i < count; i++) {
+        name_arrs[i] = (jbyteArray)(*env)->GetObjectArrayElement(env, names, i);
+        value_arrs[i] = (jbyteArray)(*env)->GetObjectArrayElement(env, values, i);
+        name_bufs[i] = (*env)->GetByteArrayElements(env, name_arrs[i], NULL);
+        value_bufs[i] = (*env)->GetByteArrayElements(env, value_arrs[i], NULL);
+        hdrs[i].name = (const uint8_t *)name_bufs[i];
+        hdrs[i].name_len = (*env)->GetArrayLength(env, name_arrs[i]);
+        hdrs[i].value = (const uint8_t *)value_bufs[i];
+        hdrs[i].value_len = (*env)->GetArrayLength(env, value_arrs[i]);
+    }
+
+    int rc = quiche_h3_send_response(H3(handle), CONN(quicConn),
+        (uint64_t)streamId, hdrs, (size_t)count, fin);
+
+    for (jsize i = 0; i < count; i++) {
+        (*env)->ReleaseByteArrayElements(env, name_arrs[i], name_bufs[i], JNI_ABORT);
+        (*env)->ReleaseByteArrayElements(env, value_arrs[i], value_bufs[i], JNI_ABORT);
+    }
+    free(hdrs);
+    free(name_bufs);
+    free(value_bufs);
+    free(name_arrs);
+    free(value_arrs);
+    return rc;
+}
+
+JNIEXPORT jint JNICALL
 JNI_FN(PKG, KicheH3Connection, nativeSendGoaway)(JNIEnv *env, jobject self,
         jlong handle, jlong quicConn, jlong id) {
     return quiche_h3_send_goaway(H3(handle), CONN(quicConn), (uint64_t)id);
@@ -195,4 +232,17 @@ JNIEXPORT jboolean JNICALL
 JNI_FN(PKG, KicheH3Connection, nativeDgramEnabledByPeer)(JNIEnv *env, jobject self,
         jlong handle, jlong quicConn) {
     return quiche_h3_dgram_enabled_by_peer(H3(handle), CONN(quicConn));
+}
+
+JNIEXPORT jlongArray JNICALL
+JNI_FN(PKG, KicheH3Connection, nativeStats)(JNIEnv *env, jobject self, jlong handle) {
+    quiche_h3_stats stats;
+    quiche_h3_conn_stats(H3(handle), &stats);
+    jlongArray result = (*env)->NewLongArray(env, 2);
+    jlong vals[2] = {
+        (jlong)stats.qpack_encoder_stream_recv_bytes,
+        (jlong)stats.qpack_decoder_stream_recv_bytes,
+    };
+    (*env)->SetLongArrayRegion(env, result, 0, 2, vals);
+    return result;
 }

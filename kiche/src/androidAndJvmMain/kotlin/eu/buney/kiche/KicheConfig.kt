@@ -78,6 +78,11 @@ actual class KicheConfig actual constructor(version: UInt) : AutoCloseable {
 
     actual fun setDisableDcidReuse(disabled: Boolean) = nativeSetDisableDcidReuse(requireOpen(), disabled)
 
+    actual fun setTicketKey(key: ByteArray) {
+        KicheException.check(nativeSetTicketKey(requireOpen(), key))
+    }
+    actual fun setEnableCubicIdleRestartFix(enabled: Boolean) = nativeSetEnableCubicIdleRestartFix(requireOpen(), enabled)
+
     actual override fun close() {
         val h = handle
         if (h != 0L) {
@@ -126,5 +131,7 @@ actual class KicheConfig actual constructor(version: UInt) : AutoCloseable {
     private external fun nativeSetActiveConnectionIdLimit(handle: Long, v: Long)
     private external fun nativeSetStatelessResetToken(handle: Long, token: ByteArray)
     private external fun nativeSetDisableDcidReuse(handle: Long, disabled: Boolean)
+    private external fun nativeSetTicketKey(handle: Long, key: ByteArray): Int
+    private external fun nativeSetEnableCubicIdleRestartFix(handle: Long, enabled: Boolean)
     //endregion
 }

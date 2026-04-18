@@ -52,12 +52,23 @@ actual class KicheH3Connection actual constructor(
         return rc.toInt()
     }
 
+    actual fun sendResponse(quicConn: KicheConnection, streamId: Long, headers: List<KicheH3Header>, fin: Boolean) {
+        val names = Array(headers.size) { headers[it].name }
+        val values = Array(headers.size) { headers[it].value }
+        KicheException.check(nativeSendResponse(requireOpen(), quicConn.getHandle(), streamId, names, values, fin))
+    }
+
     actual fun sendGoaway(quicConn: KicheConnection, id: Long) {
         KicheException.check(nativeSendGoaway(requireOpen(), quicConn.getHandle(), id))
     }
 
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =
         nativeDgramEnabledByPeer(requireOpen(), quicConn.getHandle())
+
+    actual fun stats(): KicheH3Stats {
+        val s = nativeStats(requireOpen())
+        return KicheH3Stats(s[0], s[1])
+    }
 
     actual override fun close() {
         val h = handle
@@ -81,4 +92,7 @@ actual class KicheH3Connection actual constructor(
         streamId: Long, buf: ByteArray): Long
     private external fun nativeSendGoaway(handle: Long, quicConnHandle: Long, id: Long): Int
     private external fun nativeDgramEnabledByPeer(handle: Long, quicConnHandle: Long): Boolean
+    private external fun nativeSendResponse(handle: Long, quicConnHandle: Long,
+        streamId: Long, names: Array<ByteArray>, values: Array<ByteArray>, fin: Boolean): Int
+    private external fun nativeStats(handle: Long): LongArray
 }

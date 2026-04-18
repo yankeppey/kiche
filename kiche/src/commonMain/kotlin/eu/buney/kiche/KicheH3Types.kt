@@ -49,6 +49,11 @@ class KicheH3Header(
     val valueString: String get() = value.decodeToString()
 }
 
+data class KicheH3Stats(
+    val qpackEncoderStreamRecvBytes: Long,
+    val qpackDecoderStreamRecvBytes: Long,
+)
+
 data class KicheH3Event(
     val type: KicheH3EventType,
     val streamId: Long,

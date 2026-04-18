@@ -88,12 +88,38 @@ actual class KicheH3Connection actual constructor(
         }
     }
 
+    actual fun sendResponse(
+        quicConn: KicheConnection,
+        streamId: Long,
+        headers: List<KicheH3Header>,
+        fin: Boolean
+    ) = memScoped {
+        val hdrs = allocArray<quiche_h3_header>(headers.size)
+        val pins = headers.map { h -> h.name.pin() to h.value.pin() }
+        for (i in headers.indices) {
+            hdrs[i].name = pins[i].first.addressOf(0).reinterpret()
+            hdrs[i].name_len = headers[i].name.size.toULong()
+            hdrs[i].value = pins[i].second.addressOf(0).reinterpret()
+            hdrs[i].value_len = headers[i].value.size.toULong()
+        }
+        val rc = quiche_h3_send_response(h3(), quicConn.ptr!!.reinterpret(),
+            streamId.toULong(), hdrs, headers.size.toULong(), fin)
+        pins.forEach { (n, v) -> n.unpin(); v.unpin() }
+        KicheException.check(rc)
+    }
+
     actual fun sendGoaway(quicConn: KicheConnection, id: Long) {
         KicheException.check(quiche_h3_send_goaway(h3(), quicConn.ptr!!.reinterpret(), id.toULong()))
     }
 
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =
         quiche_h3_dgram_enabled_by_peer(h3(), quicConn.ptr!!.reinterpret())
+
+    actual fun stats(): KicheH3Stats = memScoped {
+        val s = alloc<quiche_h3_stats>()
+        quiche_h3_conn_stats(h3(), s.ptr)
+        KicheH3Stats(s.qpack_encoder_stream_recv_bytes.toLong(), s.qpack_decoder_stream_recv_bytes.toLong())
+    }
 
     actual override fun close() {
         ptr?.let {

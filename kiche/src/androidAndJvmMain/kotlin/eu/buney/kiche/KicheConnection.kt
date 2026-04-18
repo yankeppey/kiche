@@ -11,6 +11,10 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     @JvmField internal var lastStreamRecvFin: Boolean = false
     @JvmField internal var lastErrorReason: ByteArray? = null
 
+    // Fields written by JNI for pathStats() address data
+    @JvmField internal var lastPathStatsLocalIp: ByteArray? = null
+    @JvmField internal var lastPathStatsPeerIp: ByteArray? = null
+
     init {
         KicheLoader.load()
     }
@@ -91,6 +95,8 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
         )
     }
 
+    actual fun sendAckEliciting(): Long = nativeSendAckEliciting(requireOpen())
+
     //endregion
 
     //region Streams
@@ -129,6 +135,10 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
 
     actual fun streamFinished(streamId: Long): Boolean = nativeStreamFinished(requireOpen(), streamId)
 
+    actual fun streamPriority(streamId: Long, urgency: Int, incremental: Boolean) {
+        KicheException.check(nativeStreamPriority(requireOpen(), streamId, urgency, incremental))
+    }
+
     //endregion
 
     //region Datagrams
@@ -145,9 +155,12 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
         return rc.toInt()
     }
 
+    actual fun dgramRecvFrontLen(): Long = nativeDgramRecvFrontLen(requireOpen())
     actual fun dgramMaxWritableLen(): Long = nativeDgramMaxWritableLen(requireOpen())
     actual fun dgramRecvQueueLen(): Long = nativeDgramRecvQueueLen(requireOpen())
+    actual fun dgramRecvQueueByteSize(): Long = nativeDgramRecvQueueByteSize(requireOpen())
     actual fun dgramSendQueueLen(): Long = nativeDgramSendQueueLen(requireOpen())
+    actual fun dgramSendQueueByteSize(): Long = nativeDgramSendQueueByteSize(requireOpen())
     actual fun isDgramSendQueueFull(): Boolean = nativeIsDgramSendQueueFull(requireOpen())
     actual fun isDgramRecvQueueFull(): Boolean = nativeIsDgramRecvQueueFull(requireOpen())
 
@@ -176,6 +189,37 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
 
     //endregion
 
+    //region Connection ID management
+    actual fun retiredScids(): Long = nativeRetiredScids(requireOpen())
+    actual fun availableDcids(): Long = nativeAvailableDcids(requireOpen())
+    actual fun scidsLeft(): Long = nativeScidsLeft(requireOpen())
+    actual fun activeScids(): Long = nativeActiveScids(requireOpen())
+
+    actual fun newScid(scid: ByteArray, resetToken: ByteArray, retireIfNeeded: Boolean): Long =
+        nativeNewScid(requireOpen(), scid, resetToken, retireIfNeeded)
+
+    actual fun retireDcid(dcidSeq: Long) {
+        KicheException.check(nativeRetireDcid(requireOpen(), dcidSeq))
+    }
+
+    actual fun retiredScidNext(): ByteArray? = nativeRetiredScidNext(requireOpen())
+    //endregion
+
+    //region TLS / session
+    actual fun setSession(session: ByteArray) {
+        KicheException.check(nativeSetSession(requireOpen(), session))
+    }
+
+    actual fun session(): ByteArray? = nativeSession(requireOpen())
+
+    actual fun setMaxIdleTimeout(v: Long) {
+        KicheException.check(nativeSetMaxIdleTimeout(requireOpen(), v))
+    }
+
+    actual fun setKeylogPath(path: String): Boolean = nativeSetKeylogPath(requireOpen(), path)
+
+    //endregion
+
     //region Close
     actual fun closeConnection(app: Boolean, err: Long, reason: ByteArray) {
         nativeClose(requireOpen(), app, err, reason)
@@ -188,6 +232,8 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     actual fun peerCert(): ByteArray? = nativePeerCert(requireOpen())
     actual fun sourceId(): ByteArray? = nativeSourceId(requireOpen())
     actual fun destinationId(): ByteArray? = nativeDestinationId(requireOpen())
+    actual fun traceId(): ByteArray? = nativeTraceId(requireOpen())
+    actual fun serverName(): ByteArray? = nativeServerName(requireOpen())
 
     actual fun peerError(): KicheConnectionError? {
         val arr = nativePeerError(requireOpen()) ?: return null
@@ -209,6 +255,26 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
         val tp = nativePeerTransportParams(requireOpen()) ?: return null
         return KicheTransportParams(tp[0], tp[1], tp[2], tp[3], tp[4], tp[5], tp[6], tp[7],
             tp[8], tp[9], tp[10] != 0L, tp[11], tp[12])
+    }
+
+    actual fun pathStats(idx: Long): KichePathStats? {
+        val data = nativePathStats(requireOpen(), idx) ?: return null
+        // data layout: [active, recv, sent, lost, retrans, rtt, minRtt, rttvar, cwnd,
+        //               sentBytes, recvBytes, lostBytes, streamRetransBytes, pmtu, deliveryRate,
+        //               fromIpLen, fromPort, toIpLen, toPort]
+        val fromIpLen = data[15].toInt()
+        val fromPort = data[16].toInt()
+        val toIpLen = data[17].toInt()
+        val toPort = data[18].toInt()
+        return KichePathStats(
+            localAddr = KicheAddress(lastPathStatsLocalIp!!, fromPort),
+            peerAddr = KicheAddress(lastPathStatsPeerIp!!, toPort),
+            active = data[0] != 0L,
+            recv = data[1], sent = data[2], lost = data[3], retrans = data[4],
+            rtt = data[5], minRtt = data[6], rttvar = data[7], cwnd = data[8],
+            sentBytes = data[9], recvBytes = data[10], lostBytes = data[11],
+            streamRetransBytes = data[12], pmtu = data[13], deliveryRate = data[14],
+        )
     }
 
     actual override fun close() {
@@ -269,5 +335,24 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativeLocalError(handle: Long): LongArray?
     private external fun nativeStats(handle: Long): LongArray
     private external fun nativePeerTransportParams(handle: Long): LongArray?
+    private external fun nativeSendAckEliciting(handle: Long): Long
+    private external fun nativeStreamPriority(handle: Long, streamId: Long, urgency: Int, incremental: Boolean): Int
+    private external fun nativeDgramRecvFrontLen(handle: Long): Long
+    private external fun nativeDgramRecvQueueByteSize(handle: Long): Long
+    private external fun nativeDgramSendQueueByteSize(handle: Long): Long
+    private external fun nativeRetiredScids(handle: Long): Long
+    private external fun nativeAvailableDcids(handle: Long): Long
+    private external fun nativeScidsLeft(handle: Long): Long
+    private external fun nativeActiveScids(handle: Long): Long
+    private external fun nativeNewScid(handle: Long, scid: ByteArray, resetToken: ByteArray, retireIfNeeded: Boolean): Long
+    private external fun nativeRetireDcid(handle: Long, dcidSeq: Long): Int
+    private external fun nativeRetiredScidNext(handle: Long): ByteArray?
+    private external fun nativeSetSession(handle: Long, session: ByteArray): Int
+    private external fun nativeSession(handle: Long): ByteArray?
+    private external fun nativeSetMaxIdleTimeout(handle: Long, v: Long): Int
+    private external fun nativeSetKeylogPath(handle: Long, path: String): Boolean
+    private external fun nativeTraceId(handle: Long): ByteArray?
+    private external fun nativeServerName(handle: Long): ByteArray?
+    private external fun nativePathStats(handle: Long, idx: Long): LongArray?
     //endregion
 }

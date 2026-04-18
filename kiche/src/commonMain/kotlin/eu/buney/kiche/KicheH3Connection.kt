@@ -5,7 +5,9 @@ expect class KicheH3Connection(quicConn: KicheConnection, config: KicheH3Config)
     fun sendRequest(quicConn: KicheConnection, headers: List<KicheH3Header>, fin: Boolean): Long
     fun sendBody(quicConn: KicheConnection, streamId: Long, body: ByteArray, fin: Boolean): Int
     fun recvBody(quicConn: KicheConnection, streamId: Long, buf: ByteArray): Int
+    fun sendResponse(quicConn: KicheConnection, streamId: Long, headers: List<KicheH3Header>, fin: Boolean)
     fun sendGoaway(quicConn: KicheConnection, id: Long)
     fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean
+    fun stats(): KicheH3Stats
     override fun close()
 }
