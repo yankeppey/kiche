@@ -367,6 +367,29 @@ class KicheHttpClientTest {
         assertTrue(body.all { it == 'A'.code.toByte() })
     }
 
+    @Test
+    fun `receive 64KB body`() = runBlocking {
+        val response = client.get("$testUrl/large/65536")
+        val body = response.readRawBytes()
+        assertEquals(65536, body.size)
+        assertTrue(body.all { it == 'A'.code.toByte() })
+    }
+
+    @Test
+    fun `receive 256KB body`() = runBlocking {
+        val response = client.get("$testUrl/large/262144")
+        val body = response.readRawBytes()
+        assertEquals(262144, body.size)
+        assertTrue(body.all { it == 'A'.code.toByte() })
+    }
+
+    @Test
+    fun `receive 1MB body`() = runBlocking {
+        val response = client.get("$testUrl/large/1048576")
+        val body = response.readRawBytes()
+        assertEquals(1048576, body.size)
+    }
+
     //endregion
 
     //region Sequential requests

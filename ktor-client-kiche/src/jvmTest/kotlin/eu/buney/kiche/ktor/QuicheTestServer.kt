@@ -1,22 +1,32 @@
 package eu.buney.kiche.ktor
 
 import eu.buney.kiche.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.security.SecureRandom
-import kotlin.concurrent.thread
 
 /**
  * A minimal HTTP/3 test server using Kiche's quiche bindings.
  * Runs on a real UDP socket on localhost.
  *
- * Handles one client at a time — sufficient for sequential Ktor engine tests.
+ * Uses coroutines to interleave sending and receiving on the UDP socket,
+ * which is required for QUIC flow control to work with large bodies.
+ * Architecture (modeled after Ktor CIO server):
+ * - **recv coroutine**: reads UDP packets, feeds conn.recv(), polls H3 events
+ * - **send coroutine**: drains conn.send() and writes UDP packets
+ * - **Mutex**: serializes access to the quiche connection (not thread-safe)
+ * - **Channel**: recv signals send that there may be packets to flush
+ *
  * Routes:
- * - ANY /echo → 200 with JSON: {"method":"...","path":"...","bodySize":N,"body":"..."} + echoed body
  * - ANY /echo-method → 200 with body = the HTTP method name
- * - POST|PUT|PATCH /echo-body → 200 with request body echoed back verbatim
+ * - ANY /echo-body → 200 with request body echoed back verbatim
+ * - ANY /echo → 200 with request body echoed back
  * - GET /hello → 200 "hello"
  * - ANY /status/NNN → NNN with empty body
  * - ANY /headers → 200 with response headers echoing request headers as "x-echo-NAME: VALUE"
@@ -28,18 +38,15 @@ import kotlin.concurrent.thread
  * - anything else → 404
  */
 class QuicheTestServer(
-    private val port: Int = 0,
+    port: Int = 0,
 ) : AutoCloseable {
 
     val actualPort: Int get() = socket.localPort
 
     private val socket = DatagramSocket(port, InetAddress.getLoopbackAddress())
     private val quicConfig: KicheConfig
-    private val h3Config = KicheH3Config()
 
-    @Volatile
-    private var running = true
-    private val serverThread: Thread
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
         val certDir = findCertDir()
@@ -57,146 +64,214 @@ class QuicheTestServer(
             setMaxIdleTimeout(30_000)
         }
 
-        serverThread = thread(name = "quiche-test-server", isDaemon = true) { serve() }
+        socket.soTimeout = 50
+        scope.launch { serve() }
     }
 
-    private fun serve() {
-        val recvBuf = ByteArray(65535)
-        val sendBuf = ByteArray(65535)
-        var serverScid = ByteArray(16).also { SecureRandom().nextBytes(it) }
-
-        socket.soTimeout = 100
-
-        var conn: KicheConnection? = null
+    /**
+     * Holds all mutable state for one QUIC+H3 connection.
+     * Access must be serialized via [mutex].
+     */
+    private class ConnectionState(
+        val conn: KicheConnection,
+        val peerPort: Int,
+    ) {
         var h3Conn: KicheH3Connection? = null
-        var local = KicheAddress(byteArrayOf(127, 0, 0, 1), actualPort)
-        var connPeerPort: Int = -1
-
-        // Pending request state per stream
+        var h3Config: KicheH3Config? = null
         val requests = mutableMapOf<Long, RequestState>()
+        /** Streams that have a complete request and pending response body to send. */
+        val pendingResponses = mutableListOf<PendingResponse>()
 
-        while (running) {
-            // Receive UDP packet
-            val packet = DatagramPacket(recvBuf, recvBuf.size)
-            val len = try {
-                socket.receive(packet)
-                packet.length
-            } catch (_: java.net.SocketTimeoutException) {
-                conn?.let {
-                    it.onTimeout()
-                    drainSend(it, sendBuf, socket)
-                    if (it.isClosed) {
-                        h3Conn?.close()
-                        it.close()
-                        h3Conn = null
-                        conn = null
-                        requests.clear()
-                        serverScid = ByteArray(16).also { s -> SecureRandom().nextBytes(s) }
-                    }
+        fun close() {
+            h3Conn?.close()
+            h3Config?.close()
+            conn.close()
+        }
+    }
+
+    private class PendingResponse(
+        val streamId: Long,
+        val body: ByteArray,
+        var offset: Int = 0,
+    )
+
+    private class RequestState {
+        var method: String = "GET"
+        var path: String = "/"
+        var headers: MutableMap<String, String> = mutableMapOf()
+        var body: MutableList<Byte> = mutableListOf()
+    }
+
+    /** Mutex serializing all access to quiche connection state (quiche is not thread-safe). */
+    private val mutex = Mutex()
+
+    /** Signal channel: recv coroutine notifies send coroutine that there may be outgoing packets. */
+    private val sendSignal = Channel<Unit>(Channel.CONFLATED)
+
+    private suspend fun serve() {
+        var state: ConnectionState? = null
+        val local = KicheAddress(byteArrayOf(127, 0, 0, 1), actualPort)
+
+        // Send coroutine: drains outgoing QUIC packets whenever signaled,
+        // and also periodically flushes + drives pending large response bodies.
+        val sendJob = scope.launch {
+            val sendBuf = ByteArray(65535)
+            while (isActive) {
+                // Wait for signal or periodic tick (for timer-driven retransmits)
+                withTimeoutOrNull(10) { sendSignal.receive() }
+
+                mutex.withLock {
+                    val s = state ?: return@withLock
+                    // Drive pending large response bodies
+                    drivePendingResponses(s)
+                    // Flush outgoing packets
+                    drainSend(s.conn, sendBuf)
                 }
-                continue
-            }
-
-            val fromIp = packet.address.address
-            val fromPort = packet.port
-            val from = KicheAddress(fromIp, fromPort)
-
-            // If we have an existing connection but receive from a different peer port,
-            // this is a new client. Close the old connection and accept a new one.
-            if (conn != null && fromPort != connPeerPort) {
-                h3Conn?.close()
-                conn.close()
-                h3Conn = null
-                conn = null
-                requests.clear()
-                serverScid = ByteArray(16).also { s -> SecureRandom().nextBytes(s) }
-            }
-
-            // Accept new connection on first packet
-            if (conn == null) {
-                connPeerPort = fromPort
-                local = KicheAddress(byteArrayOf(127, 0, 0, 1), actualPort)
-                conn = KicheConnection.accept(
-                    scid = serverScid,
-                    odcid = null,
-                    local = local,
-                    peer = from,
-                    config = quicConfig,
-                )
-            }
-
-            conn.recv(recvBuf, len, from, local)
-            drainSend(conn, sendBuf, socket)
-
-            // Create H3 connection once QUIC handshake completes
-            if (conn.isEstablished && h3Conn == null) {
-                h3Conn = KicheH3Connection(conn, h3Config)
-            }
-
-            // Poll H3 events
-            val h3 = h3Conn ?: continue
-            while (true) {
-                val event = h3.poll(conn) ?: break
-
-                when (event.type) {
-                    KicheH3EventType.Headers -> {
-                        val state = RequestState()
-                        event.headers?.forEach { header ->
-                            when (header.nameString) {
-                                ":method" -> state.method = header.valueString
-                                ":path" -> state.path = header.valueString
-                                else -> if (!header.nameString.startsWith(":")) {
-                                    state.headers[header.nameString] = header.valueString
-                                }
-                            }
-                        }
-                        requests[event.streamId] = state
-                    }
-
-                    KicheH3EventType.Data -> {
-                        val bodyBuf = ByteArray(65535)
-                        val state = requests[event.streamId] ?: continue
-                        while (true) {
-                            val n = try {
-                                h3.recvBody(conn, event.streamId, bodyBuf)
-                            } catch (_: KicheException) {
-                                break
-                            }
-                            if (n <= 0) break
-                            state.body.addAll(bodyBuf.sliceArray(0 until n).toList())
-                        }
-                    }
-
-                    KicheH3EventType.Finished -> {
-                        val state = requests.remove(event.streamId) ?: continue
-                        handleRequest(h3, conn, event.streamId, state)
-                    }
-
-                    else -> {}
-                }
-            }
-
-            drainSend(conn, sendBuf, socket)
-
-            // If connection is closed, reset for next client
-            if (conn.isClosed) {
-                h3Conn?.close()
-                conn.close()
-                h3Conn = null
-                conn = null
-                requests.clear()
-                serverScid = ByteArray(16).also { s -> SecureRandom().nextBytes(s) }
             }
         }
 
-        // Cleanup
-        h3Conn?.close()
-        conn?.close()
+        // Recv coroutine: reads UDP packets, processes H3 events.
+        val recvBuf = ByteArray(65535)
+        try {
+            while (scope.isActive) {
+                val packet = DatagramPacket(recvBuf, recvBuf.size)
+                val len = try {
+                    socket.receive(packet)
+                    packet.length
+                } catch (_: java.net.SocketTimeoutException) {
+                    // Drive timeouts
+                    mutex.withLock {
+                        val s = state ?: return@withLock
+                        s.conn.onTimeout()
+                        sendSignal.trySend(Unit)
+                    }
+                    continue
+                }
+
+                val fromPort = packet.port
+                val from = KicheAddress(packet.address.address, fromPort)
+
+                mutex.withLock {
+                    // New client from different port → reset connection
+                    state?.let { current ->
+                        if (fromPort != current.peerPort) {
+                            current.close()
+                            state = null
+                        }
+                    }
+
+                    // Accept new connection
+                    if (state == null) {
+                        val scid = ByteArray(16).also { SecureRandom().nextBytes(it) }
+                        val conn = KicheConnection.accept(
+                            scid = scid, odcid = null,
+                            local = local, peer = from, config = quicConfig,
+                        )
+                        state = ConnectionState(conn, fromPort)
+                    }
+
+                    val s = state ?: return@withLock
+                    s.conn.recv(buf = recvBuf, len = len, from = from, to = local)
+
+                    // Create H3 connection once handshake completes
+                    if (s.conn.isEstablished && s.h3Conn == null) {
+                        s.h3Config = KicheH3Config()
+                        s.h3Conn = KicheH3Connection(s.conn, s.h3Config!!)
+                    }
+
+                    // Poll H3 events
+                    val h3 = s.h3Conn
+                    if (h3 != null) {
+                        pollH3Events(s, h3)
+                    }
+
+                    // Signal send coroutine
+                    sendSignal.trySend(Unit)
+
+                    // Connection closed → cleanup
+                    if (s.conn.isClosed) {
+                        s.close()
+                        state = null
+                    }
+                }
+            }
+        } finally {
+            sendJob.cancel()
+            mutex.withLock { state?.close() }
+        }
+    }
+
+    private fun pollH3Events(s: ConnectionState, h3: KicheH3Connection) {
+        while (true) {
+            val event = h3.poll(quicConn = s.conn) ?: break
+
+            when (event.type) {
+                KicheH3EventType.Headers -> {
+                    val req = RequestState()
+                    event.headers?.forEach { header ->
+                        when (header.nameString) {
+                            ":method" -> req.method = header.valueString
+                            ":path" -> req.path = header.valueString
+                            else -> if (!header.nameString.startsWith(":")) {
+                                req.headers[header.nameString] = header.valueString
+                            }
+                        }
+                    }
+                    s.requests[event.streamId] = req
+                }
+
+                KicheH3EventType.Data -> {
+                    val bodyBuf = ByteArray(65535)
+                    val req = s.requests[event.streamId] ?: continue
+                    while (true) {
+                        val n = try {
+                            h3.recvBody(quicConn = s.conn, streamId = event.streamId, buf = bodyBuf)
+                        } catch (_: KicheException) {
+                            break
+                        }
+                        if (n <= 0) break
+                        req.body.addAll(bodyBuf.copyOf(n).toList())
+                    }
+                }
+
+                KicheH3EventType.Finished -> {
+                    val req = s.requests.remove(event.streamId) ?: continue
+                    handleRequest(s, h3, event.streamId, req)
+                }
+
+                else -> {}
+            }
+        }
+    }
+
+    /**
+     * Drives pending large response bodies by sending as much as flow control allows.
+     * Called from the send coroutine on each tick.
+     */
+    private fun drivePendingResponses(s: ConnectionState) {
+        val h3 = s.h3Conn ?: return
+        val iter = s.pendingResponses.iterator()
+        while (iter.hasNext()) {
+            val pending = iter.next()
+            while (pending.offset < pending.body.size) {
+                val chunk = pending.body.copyOfRange(pending.offset, pending.body.size)
+                val sent = try {
+                    h3.sendBody(quicConn = s.conn, streamId = pending.streamId, body = chunk, fin = true)
+                } catch (_: KicheException) {
+                    break // stream blocked, will retry next tick
+                }
+                if (sent <= 0) break
+                pending.offset += sent
+            }
+            if (pending.offset >= pending.body.size) {
+                iter.remove()
+            }
+        }
     }
 
     private fun handleRequest(
+        s: ConnectionState,
         h3: KicheH3Connection,
-        conn: KicheConnection,
         streamId: Long,
         request: RequestState,
     ) {
@@ -206,29 +281,24 @@ class QuicheTestServer(
         val bodyBytes = request.body.toByteArray()
 
         when {
-            path == "/hello" -> {
-                sendResponse(h3, conn, streamId, 200, "hello".encodeToByteArray())
-            }
+            path == "/hello" ->
+                sendResponse(s, h3, streamId, 200, "hello".encodeToByteArray())
 
-            path == "/empty" -> {
-                sendResponse(h3, conn, streamId, 200, ByteArray(0))
-            }
+            path == "/empty" ->
+                sendResponse(s, h3, streamId, 200, ByteArray(0))
 
-            path == "/echo-method" -> {
-                sendResponse(h3, conn, streamId, 200, method.encodeToByteArray())
-            }
+            path == "/echo-method" ->
+                sendResponse(s, h3, streamId, 200, method.encodeToByteArray())
 
-            path == "/echo-body" -> {
-                sendResponse(h3, conn, streamId, 200, bodyBytes)
-            }
+            path == "/echo-body" ->
+                sendResponse(s, h3, streamId, 200, bodyBytes)
 
-            path == "/echo" -> {
-                sendResponse(h3, conn, streamId, 200, bodyBytes)
-            }
+            path == "/echo" ->
+                sendResponse(s, h3, streamId, 200, bodyBytes)
 
             path.startsWith("/status/") -> {
                 val status = path.removePrefix("/status/").toIntOrNull() ?: 400
-                sendResponse(h3, conn, streamId, status, ByteArray(0))
+                sendResponse(s, h3, streamId, status, ByteArray(0))
             }
 
             path == "/headers" -> {
@@ -238,22 +308,21 @@ class QuicheTestServer(
                 val responseHeaders = mutableListOf(
                     KicheH3Header(":status", "200"),
                 ) + echoHeaders
-                h3.sendResponse(conn, streamId, responseHeaders, fin = true)
+                h3.sendResponse(quicConn = s.conn, streamId = streamId, headers = responseHeaders, fin = true)
             }
 
             path == "/content-type" -> {
                 val ct = request.headers["content-type"] ?: "none"
-                sendResponse(h3, conn, streamId, 200, ct.encodeToByteArray())
+                sendResponse(s, h3, streamId, 200, ct.encodeToByteArray())
             }
 
-            path == "/query" -> {
-                sendResponse(h3, conn, streamId, 200, query.encodeToByteArray())
-            }
+            path == "/query" ->
+                sendResponse(s, h3, streamId, 200, query.encodeToByteArray())
 
             path.startsWith("/large/") -> {
                 val size = path.removePrefix("/large/").toIntOrNull() ?: 0
                 val body = ByteArray(size) { 'A'.code.toByte() }
-                sendResponse(h3, conn, streamId, 200, body)
+                sendResponse(s, h3, streamId, 200, body)
             }
 
             path == "/multi-header" -> {
@@ -264,43 +333,58 @@ class QuicheTestServer(
                     KicheH3Header("x-multi", "value3"),
                     KicheH3Header("x-single", "only"),
                 )
-                h3.sendResponse(conn, streamId, responseHeaders, fin = true)
+                h3.sendResponse(quicConn = s.conn, streamId = streamId, headers = responseHeaders, fin = true)
             }
 
-            else -> {
-                sendResponse(h3, conn, streamId, 404, "not found".encodeToByteArray())
-            }
+            else ->
+                sendResponse(s, h3, streamId, 404, "not found".encodeToByteArray())
         }
     }
 
+    /**
+     * Sends H3 response headers and begins sending body.
+     * If the full body can't be sent immediately (flow control), queues it
+     * as a [PendingResponse] to be driven incrementally by the send coroutine.
+     */
     private fun sendResponse(
+        s: ConnectionState,
         h3: KicheH3Connection,
-        conn: KicheConnection,
         streamId: Long,
         status: Int,
         body: ByteArray,
     ) {
         val headers = listOf(KicheH3Header(":status", status.toString()))
         val hasBody = body.isNotEmpty()
-        h3.sendResponse(conn, streamId, headers, fin = !hasBody)
+        h3.sendResponse(quicConn = s.conn, streamId = streamId, headers = headers, fin = !hasBody)
         if (hasBody) {
-            h3.sendBody(conn, streamId, body, fin = true)
+            val sent = try {
+                h3.sendBody(quicConn = s.conn, streamId = streamId, body = body, fin = true)
+            } catch (_: KicheException) {
+                0
+            }
+            if (sent < body.size) {
+                // Couldn't send everything — queue remainder for incremental sending
+                s.pendingResponses.add(PendingResponse(streamId, body, offset = sent))
+            }
+        }
+    }
+
+    private fun drainSend(conn: KicheConnection, buf: ByteArray) {
+        while (true) {
+            val result = conn.send(buf, buf.size) ?: break
+            val packet = DatagramPacket(
+                buf, 0, result.written,
+                InetAddress.getByAddress(result.to.ip),
+                result.to.port,
+            )
+            socket.send(packet)
         }
     }
 
     override fun close() {
-        running = false
-        serverThread.join(5000)
-        h3Config.close()
+        scope.cancel()
         quicConfig.close()
         socket.close()
-    }
-
-    private class RequestState {
-        var method: String = "GET"
-        var path: String = "/"
-        var headers: MutableMap<String, String> = mutableMapOf()
-        var body: MutableList<Byte> = mutableListOf()
     }
 
     companion object {
@@ -315,18 +399,6 @@ class QuicheTestServer(
                 if (File(path, "cert.crt").exists()) return path
             }
             error("Cannot find quiche example certs. Searched: $candidates")
-        }
-
-        private fun drainSend(conn: KicheConnection, buf: ByteArray, socket: DatagramSocket) {
-            while (true) {
-                val result = conn.send(buf, buf.size) ?: break
-                val packet = DatagramPacket(
-                    buf, 0, result.written,
-                    InetAddress.getByAddress(result.to.ip),
-                    result.to.port,
-                )
-                socket.send(packet)
-            }
         }
     }
 }

@@ -114,7 +114,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
             val headers = buildH3Headers(data)
             val hasBody = data.body !is OutgoingContent.NoContent
 
-            val streamId = h3Conn.sendRequest(conn, headers, fin = !hasBody)
+            val streamId = h3Conn.sendRequest(quicConn = conn, headers = headers, fin = !hasBody)
 
             // Send body if present
             if (hasBody) {
@@ -124,9 +124,9 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                     else -> error("Unsupported request body type: ${body::class.simpleName}. Only ByteArrayContent is supported.")
                 }
                 if (bodyBytes.isNotEmpty()) {
-                    h3Conn.sendBody(conn, streamId, bodyBytes, fin = true)
+                    h3Conn.sendBody(quicConn = conn, streamId = streamId, body = bodyBytes, fin = true)
                 } else {
-                    h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
+                    h3Conn.sendBody(quicConn = conn, streamId = streamId, body = ByteArray(0), fin = true)
                 }
             }
 
@@ -158,7 +158,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
 
                 // Poll H3 events
                 while (true) {
-                    val event = h3Conn.poll(conn) ?: break
+                    val event = h3Conn.poll(quicConn = conn) ?: break
 
                     when (event.type) {
                         KicheH3EventType.Headers -> {
@@ -171,7 +171,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                             val bodyBuf = ByteArray(MAX_DATAGRAM_SIZE)
                             while (true) {
                                 val n = try {
-                                    h3Conn.recvBody(conn, event.streamId, bodyBuf)
+                                    h3Conn.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
                                 } catch (_: KicheException) {
                                     break
                                 }
