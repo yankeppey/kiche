@@ -850,10 +850,10 @@ JNI_FN(PKG, KicheConnection, nativePathsIter)(JNIEnv *env, jobject self, jlong h
     if (!iter) return NULL;
 
     // Collect all addresses from iterator (typically 1-4 paths)
-    struct sockaddr_storage addrs[16];
+    struct sockaddr_storage addrs[64];
     int count = 0;
     size_t peer_len;
-    while (count < 16 && quiche_socket_addr_iter_next(iter, &addrs[count], &peer_len)) {
+    while (count < 64 && quiche_socket_addr_iter_next(iter, &addrs[count], &peer_len)) {
         count++;
     }
     quiche_socket_addr_iter_free(iter);

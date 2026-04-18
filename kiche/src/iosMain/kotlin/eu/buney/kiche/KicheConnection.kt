@@ -360,7 +360,7 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                 toSs?.ptr?.reinterpret(), toLen,
                 si.ptr)
             if (written == QUICHE_ERR_DONE.toLong()) return null
-            if (written < 0) return null
+            if (written < 0) { KicheException.check(written.toInt()); return null }
 
             val fromAddr = extractSockaddr(si.from.ptr)
             val toAddr = extractSockaddr(si.to.ptr)
