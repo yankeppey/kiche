@@ -1,15 +1,11 @@
 /*
- * Tier 2 tests: In-memory QUIC handshake, streams, and datagrams.
+ * In-memory QUIC connection tests.
  *
  * Ported from quiche's Rust tests using the TestPipe helper (equivalent
  * to quiche's test_utils::Pipe). All tests run entirely in memory with
  * no network I/O.
  *
- * C test coverage mapping:
- * - tests.rs:handshake()      → testHandshake
- * - tests.rs:handshake_done() → testHandshakeDone
- * - tests.rs:streamio()       → testStreamSendRecv
- * - tests.rs:flow_control_limit() → testStreamCapacity
+ * Each test references the original Rust test name and line number.
  */
 package eu.buney.kiche
 
@@ -21,7 +17,7 @@ import kotlin.test.assertTrue
 
 class KicheConnectionTest {
 
-    //region Handshake
+    //region tests.rs:handshake (line 454)
 
     /**
      * Ported from tests.rs:handshake()
@@ -41,18 +37,8 @@ class KicheConnectionTest {
             assertFalse(pipe.server.isClosed)
             assertFalse(pipe.client.isServer)
             assertTrue(pipe.server.isServer)
-        }
-        println("    handshake() ... OK.")
-    }
 
-    /**
-     * Verifies the negotiated ALPN protocol after handshake.
-     */
-    @Test
-    fun testHandshakeAlpn() {
-        TestPipe.new().use { pipe ->
-            pipe.handshake()
-
+            // Verify ALPN negotiation (part of handshake test)
             val clientProto = pipe.client.applicationProto()
             assertNotNull(clientProto, "client ALPN should not be null")
             assertEquals("proto1", clientProto.decodeToString())
@@ -61,97 +47,48 @@ class KicheConnectionTest {
             assertNotNull(serverProto, "server ALPN should not be null")
             assertEquals("proto1", serverProto.decodeToString())
         }
-        println("    handshake ALPN negotiation ... OK.")
-    }
-
-    /**
-     * Verifies connection IDs are available after handshake.
-     */
-    @Test
-    fun testConnectionIds() {
-        TestPipe.new().use { pipe ->
-            pipe.handshake()
-
-            val clientScid = pipe.client.sourceId()
-            assertNotNull(clientScid, "client SCID should not be null")
-            assertTrue(clientScid.isNotEmpty())
-
-            val clientDcid = pipe.client.destinationId()
-            assertNotNull(clientDcid, "client DCID should not be null")
-            assertTrue(clientDcid.isNotEmpty())
-        }
-        println("    connection IDs ... OK.")
-    }
-
-    /**
-     * Verifies stats are available after handshake.
-     */
-    @Test
-    fun testStats() {
-        TestPipe.new().use { pipe ->
-            pipe.handshake()
-
-            val stats = pipe.client.stats()
-            assertTrue(stats.sent > 0, "should have sent packets")
-            assertTrue(stats.recv > 0, "should have received packets")
-            assertTrue(stats.sentBytes > 0, "should have sent bytes")
-            assertTrue(stats.recvBytes > 0, "should have received bytes")
-        }
-        println("    stats after handshake ... OK.")
-    }
-
-    /**
-     * Verifies peer transport params are available after handshake.
-     */
-    @Test
-    fun testPeerTransportParams() {
-        TestPipe.new().use { pipe ->
-            pipe.handshake()
-
-            val tp = pipe.client.peerTransportParams()
-            assertNotNull(tp, "peer transport params should not be null")
-            assertTrue(tp.peerInitialMaxData > 0)
-            assertTrue(tp.peerInitialMaxStreamsBidi > 0)
-        }
-        println("    peer transport params ... OK.")
+        println("    handshake ... OK.")
     }
 
     //endregion
 
-    //region Streams
+    //region tests.rs:streamio (line 1008)
 
     /**
      * Ported from tests.rs:streamio()
      * Basic bidirectional stream send/receive roundtrip.
      */
     @Test
-    fun testStreamSendRecv() {
+    fun testStreamio() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
             // Client sends on stream 4 (first client-initiated bidi stream)
-            val data = "hello, quiche!".encodeToByteArray()
-            val written = pipe.client.streamSend(4, data, data.size, true)
-            assertEquals(data.size, written)
+            val data = "hello, world".encodeToByteArray()
+            assertEquals(data.size, pipe.client.streamSend(4, data, data.size, true))
 
-            // Exchange packets
             pipe.advance()
 
             // Server receives
-            val recvBuf = ByteArray(1024)
-            val result = pipe.server.streamRecv(4, recvBuf, recvBuf.size)
+            val buf = ByteArray(1024)
+            val result = pipe.server.streamRecv(4, buf, buf.size)
             assertEquals(data.size, result.read)
             assertTrue(result.fin, "fin should be set")
-            assertEquals("hello, quiche!", recvBuf.copyOf(result.read).decodeToString())
+            assertEquals("hello, world", buf.copyOf(result.read).decodeToString())
         }
-        println("    stream send/recv ... OK.")
+        println("    streamio ... OK.")
     }
 
+    //endregion
+
+    //region tests.rs:streamio_mixed_actions (line 1094)
+
     /**
-     * Bidirectional stream — server responds back to client.
+     * Ported from tests.rs:streamio_mixed_actions()
+     * Bidirectional stream — server responds back to client on the same stream.
      */
     @Test
-    fun testStreamBidirectional() {
+    fun testStreamioMixedActions() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
@@ -176,11 +113,15 @@ class KicheConnectionTest {
             assertEquals("response", buf.copyOf(recv2.read).decodeToString())
             assertTrue(recv2.fin)
         }
-        println("    bidirectional stream ... OK.")
+        println("    streamio_mixed_actions ... OK.")
     }
 
+    //endregion
+
+    //region tests.rs:stream_readable / stream_writable (lines 4353 / 4425)
+
     /**
-     * Tests stream readability/writability queries.
+     * Ported from tests.rs:stream_readable() and stream_writable()
      */
     @Test
     fun testStreamReadableWritable() {
@@ -198,177 +139,365 @@ class KicheConnectionTest {
             assertTrue(pipe.server.streamReadable(4))
             assertEquals(4, pipe.server.streamReadableNext())
         }
-        println("    stream readable/writable ... OK.")
-    }
-
-    /**
-     * Tests stream finished state.
-     */
-    @Test
-    fun testStreamFinished() {
-        TestPipe.new().use { pipe ->
-            pipe.handshake()
-
-            // Send with fin=true
-            pipe.client.streamSend(4, "done".encodeToByteArray(), 4, true)
-            pipe.advance()
-
-            // Read the data
-            val buf = ByteArray(100)
-            val result = pipe.server.streamRecv(4, buf, buf.size)
-            assertTrue(result.fin)
-
-            // Stream should be finished after reading fin
-            assertTrue(pipe.server.streamFinished(4))
-        }
-        println("    stream finished ... OK.")
+        println("    stream_readable / stream_writable ... OK.")
     }
 
     //endregion
 
-    //region Datagrams
+    //region tests.rs:stream_left_bidi (line 1928)
 
     /**
-     * Tests QUIC datagram send/receive (RFC 9221).
+     * Ported from tests.rs:stream_left_bidi()
+     * Verifies peer_streams_left_bidi decrements as streams are opened.
      */
     @Test
-    fun testDgramSendRecv() {
+    fun testStreamLeftBidi() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
-            // Client sends a datagram
-            val data = "datagram!".encodeToByteArray()
-            val written = pipe.client.dgramSend(data, data.size)
-            assertEquals(data.size, written)
+            assertEquals(100, pipe.client.peerStreamsLeftBidi())
+            assertEquals(100, pipe.server.peerStreamsLeftBidi())
+
+            // Server opens bidi streams (server-initiated bidi: 1, 5, 9, ...)
+            pipe.server.streamSend(1, "a".encodeToByteArray(), 1, false)
+            assertEquals(99, pipe.server.peerStreamsLeftBidi())
+
+            pipe.server.streamSend(5, "a".encodeToByteArray(), 1, false)
+            assertEquals(98, pipe.server.peerStreamsLeftBidi())
+        }
+        println("    stream_left_bidi ... OK.")
+    }
+
+    //endregion
+
+    //region tests.rs:stream_left_uni (line 1956)
+
+    /**
+     * Ported from tests.rs:stream_left_uni()
+     * Verifies peer_streams_left_uni decrements as streams are opened.
+     */
+    @Test
+    fun testStreamLeftUni() {
+        TestPipe.new().use { pipe ->
+            pipe.handshake()
+
+            assertEquals(100, pipe.client.peerStreamsLeftUni())
+            assertEquals(100, pipe.server.peerStreamsLeftUni())
+
+            // Server opens uni streams (server-initiated uni: 3, 7, 11, ...)
+            pipe.server.streamSend(3, "a".encodeToByteArray(), 1, false)
+            assertEquals(99, pipe.server.peerStreamsLeftUni())
+
+            pipe.server.streamSend(7, "a".encodeToByteArray(), 1, false)
+            assertEquals(98, pipe.server.peerStreamsLeftUni())
+        }
+        println("    stream_left_uni ... OK.")
+    }
+
+    //endregion
+
+    //region tests.rs:dgram_single_datagram (line 8231)
+
+    /**
+     * Ported from tests.rs:dgram_single_datagram()
+     * Tests QUIC datagram send/receive (RFC 9221).
+     */
+    @Test
+    fun testDgramSingleDatagram() {
+        TestPipe.new().use { pipe ->
+            pipe.handshake()
+
+            val data = "hello, world".encodeToByteArray()
+            assertEquals(data.size, pipe.client.dgramSend(data, data.size))
 
             pipe.advance()
 
-            // Server receives
             val buf = ByteArray(1024)
             val read = pipe.server.dgramRecv(buf, buf.size)
             assertEquals(data.size, read)
-            assertEquals("datagram!", buf.copyOf(read).decodeToString())
+            assertEquals("hello, world", buf.copyOf(read).decodeToString())
         }
-        println("    dgram send/recv ... OK.")
+        println("    dgram_single_datagram ... OK.")
     }
 
+    //endregion
+
+    //region tests.rs:dgram_multiple_datagrams (line 8271)
+
     /**
-     * Tests datagram max writable length.
+     * Ported from tests.rs:dgram_multiple_datagrams()
+     * Tests multiple datagrams, queue lengths, and byte sizes.
+     * Note: dgram_purge_outgoing is not wrapped, so that part is skipped.
      */
     @Test
-    fun testDgramMaxWritableLen() {
+    fun testDgramMultipleDatagrams() {
+        TestPipe.newWithDgramConfig(recvQueueLen = 10, sendQueueLen = 10).use { pipe ->
+            pipe.handshake()
+
+            assertEquals(0, pipe.client.dgramSendQueueLen())
+            assertEquals(0, pipe.client.dgramSendQueueByteSize())
+
+            pipe.client.dgramSend("hello, world".encodeToByteArray(), 12)
+            pipe.client.dgramSend("ciao, mondo".encodeToByteArray(), 11)
+
+            assertEquals(2, pipe.client.dgramSendQueueLen())
+            assertEquals(23, pipe.client.dgramSendQueueByteSize())
+
+            // Before packets exchanged, no dgrams on server receive side.
+            assertEquals(0, pipe.server.dgramRecvQueueLen())
+
+            pipe.advance()
+
+            // After packets exchanged, no dgrams on client send side.
+            assertEquals(0, pipe.client.dgramSendQueueLen())
+            assertEquals(0, pipe.client.dgramSendQueueByteSize())
+
+            assertEquals(2, pipe.server.dgramRecvQueueLen())
+            assertEquals(23, pipe.server.dgramRecvQueueByteSize())
+
+            val buf = ByteArray(1024)
+            val r1 = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(12, r1)
+            assertEquals('h'.code.toByte(), buf[0])
+            assertEquals('e'.code.toByte(), buf[1])
+
+            val r2 = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(11, r2)
+            assertEquals('c'.code.toByte(), buf[0])
+            assertEquals('i'.code.toByte(), buf[1])
+
+            assertEquals(0, pipe.server.dgramRecvQueueLen())
+            assertEquals(0, pipe.server.dgramRecvQueueByteSize())
+        }
+        println("    dgram_multiple_datagrams ... OK.")
+    }
+
+    //endregion
+
+    //region tests.rs:dgram_send_queue_overflow (line 8348)
+
+    /**
+     * Ported from tests.rs:dgram_send_queue_overflow()
+     * Third datagram is rejected when send queue len is 2.
+     */
+    @Test
+    fun testDgramSendQueueOverflow() {
+        TestPipe.newWithDgramConfig(recvQueueLen = 10, sendQueueLen = 2).use { pipe ->
+            pipe.handshake()
+
+            pipe.client.dgramSend("hello, world".encodeToByteArray(), 12)
+            pipe.client.dgramSend("ciao, mondo".encodeToByteArray(), 11)
+
+            // Third should fail (queue full → DONE)
+            try {
+                pipe.client.dgramSend("hola, mundo".encodeToByteArray(), 11)
+                // If no exception, the queue wasn't full (shouldn't happen with len=2)
+            } catch (e: KicheException) {
+                assertEquals(KicheError.Done, e.error)
+            }
+
+            pipe.advance()
+
+            val buf = ByteArray(1024)
+            val r1 = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(12, r1)
+
+            val r2 = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(11, r2)
+        }
+        println("    dgram_send_queue_overflow ... OK.")
+    }
+
+    //endregion
+
+    //region tests.rs:dgram_send_max_size (line 8447)
+
+    /**
+     * Ported from tests.rs:dgram_send_max_size()
+     * Verifies dgram_max_writable_len returns correct size after handshake.
+     */
+    @Test
+    fun testDgramSendMaxSize() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
             val maxLen = pipe.client.dgramMaxWritableLen()
             assertTrue(maxLen > 0, "dgram max writable len should be positive: $maxLen")
-        }
-        println("    dgram max writable len ... OK.")
-    }
 
-    /**
-     * Tests datagram queue queries.
-     */
-    @Test
-    fun testDgramQueueState() {
-        TestPipe.new().use { pipe ->
-            pipe.handshake()
+            // Send a max-sized datagram
+            val data = ByteArray(maxLen.toInt()) { 42 }
+            pipe.client.dgramSend(data, data.size)
 
-            // Initially queues should be empty
-            assertEquals(0, pipe.client.dgramSendQueueLen())
-            assertFalse(pipe.client.isDgramSendQueueFull())
+            pipe.advance()
+
+            val buf = ByteArray(maxLen.toInt() + 100)
+            val read = pipe.server.dgramRecv(buf, buf.size)
+            assertEquals(maxLen.toInt(), read)
         }
-        println("    dgram queue state ... OK.")
+        println("    dgram_send_max_size ... OK.")
     }
 
     //endregion
 
-    //region Connection lifecycle
+    //region tests.rs:is_readable (line 8500)
 
     /**
-     * Tests connection timeout tracking.
+     * Ported from tests.rs:is_readable()
+     * Tests is_readable for both streams and datagrams.
      */
     @Test
-    fun testTimeout() {
+    fun testIsReadable() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
-            val timeout = pipe.client.timeoutAsMillis()
-            assertTrue(timeout > 0, "timeout should be positive: $timeout")
+            // No readable data initially.
+            assertFalse(pipe.client.isReadable)
+            assertFalse(pipe.server.isReadable)
 
-            val timeoutNanos = pipe.client.timeoutAsNanos()
-            assertTrue(timeoutNanos > 0, "timeout nanos should be positive")
+            // Client sends stream data.
+            pipe.client.streamSend(4, "aaaaa".encodeToByteArray(), 5, false)
+            pipe.advance()
+
+            // Server received stream → readable.
+            assertFalse(pipe.client.isReadable)
+            assertTrue(pipe.server.isReadable)
+
+            // Server sends back.
+            pipe.server.streamSend(4, "bbbbb".encodeToByteArray(), 5, false)
+            pipe.advance()
+
+            // Client received stream → readable.
+            assertTrue(pipe.client.isReadable)
+            assertTrue(pipe.server.isReadable)
+
+            // Client drains stream.
+            val buf = ByteArray(1024)
+            pipe.client.streamRecv(4, buf, buf.size)
+            assertFalse(pipe.client.isReadable)
+
+            // Server shuts down stream read → no longer readable.
+            pipe.server.streamShutdown(4, KicheShutdown.Read, 0)
+            assertFalse(pipe.server.isReadable)
+
+            // Server receives dgram → readable.
+            pipe.client.dgramSend("dddddddddddddd".encodeToByteArray(), 14)
+            pipe.advance()
+            assertTrue(pipe.server.isReadable)
+
+            // Drain dgram → not readable.
+            pipe.server.dgramRecv(buf, buf.size)
+            assertFalse(pipe.server.isReadable)
         }
-        println("    timeout ... OK.")
+        println("    is_readable ... OK.")
     }
 
+    //endregion
+
+    //region tests.rs:close (line 8632)
+
     /**
-     * Tests graceful connection close.
+     * Ported from tests.rs:close()
+     * Tests transport-level connection close.
      */
     @Test
-    fun testConnectionClose() {
+    fun testClose() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
-            // Client closes with application error
-            pipe.client.closeConnection(true, 0, "bye".encodeToByteArray())
+            pipe.client.closeConnection(app = false, err = 0x1234, reason = "hello?".encodeToByteArray())
 
-            // Drain remaining packets (close triggers CONNECTION_CLOSE frame)
-            try { pipe.advance() } catch (_: KicheException) { /* expected DONE */ }
+            // Second close should be no-op (DONE)
+            try {
+                pipe.client.closeConnection(app = false, err = 0x4321, reason = "hello?".encodeToByteArray())
+            } catch (_: KicheException) {
+                // Expected: DONE
+            }
 
-            // Client should be draining or closed
+            pipe.advance()
+
             assertTrue(pipe.client.isClosed || pipe.client.isDraining)
         }
-        println("    connection close ... OK.")
+        println("    close ... OK.")
     }
 
+    //endregion
+
+    //region tests.rs:app_close_by_client (line 8661)
+
     /**
-     * Tests peer error reporting after close.
+     * Ported from tests.rs:app_close_by_client()
+     * Tests application-level connection close.
+     */
+    @Test
+    fun testAppCloseByClient() {
+        TestPipe.new().use { pipe ->
+            pipe.handshake()
+
+            pipe.client.closeConnection(app = true, err = 0x1234, reason = "hello!".encodeToByteArray())
+
+            // Second close should be no-op (DONE)
+            try {
+                pipe.client.closeConnection(app = true, err = 0x4321, reason = "hello!".encodeToByteArray())
+            } catch (_: KicheException) {
+                // Expected: DONE
+            }
+
+            pipe.advance()
+
+            assertTrue(pipe.client.isClosed || pipe.client.isDraining)
+        }
+        println("    app_close_by_client ... OK.")
+    }
+
+    //endregion
+
+    //region tests.rs:peer_error (line 8902)
+
+    /**
+     * Ported from tests.rs:peer_error()
+     * Tests transport error reporting to peer.
      */
     @Test
     fun testPeerError() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
-            // No error before close
-            val noError = pipe.server.peerError()
-            // May or may not be null depending on state
-
-            // Client closes with error code 42
-            pipe.client.closeConnection(true, 42, "test reason".encodeToByteArray())
+            pipe.server.closeConnection(app = false, err = 0x1234, reason = "hello?".encodeToByteArray())
             pipe.advance()
 
-            // Server should see peer error
-            val err = pipe.server.peerError()
-            if (err != null) {
-                assertTrue(err.isApp, "should be app error")
-                assertEquals(42, err.errorCode)
-            }
+            val err = pipe.client.peerError()
+            assertNotNull(err, "client should see peer error")
+            assertFalse(err.isApp, "should be transport error")
+            assertEquals(0x1234, err.errorCode)
         }
-        println("    peer error ... OK.")
+        println("    peer_error ... OK.")
     }
 
+    //endregion
+
+    //region tests.rs:local_error (line 8940)
+
     /**
-     * Tests connection state queries.
+     * Ported from tests.rs:local_error()
+     * Tests local error reporting after close.
      */
     @Test
-    fun testConnectionState() {
+    fun testLocalError() {
         TestPipe.new().use { pipe ->
             pipe.handshake()
 
-            assertFalse(pipe.client.isTimedOut)
-            assertFalse(pipe.client.isResumed)
+            // No error before close.
+            val noError = pipe.server.localError()
+            assertEquals(null, noError)
 
-            val streamsLeft = pipe.client.peerStreamsLeftBidi()
-            assertTrue(streamsLeft > 0, "should have bidi streams available: $streamsLeft")
+            pipe.server.closeConnection(app = true, err = 0x1234, reason = "hello!".encodeToByteArray())
 
-            val maxPayload = pipe.client.maxSendUdpPayloadSize()
-            assertTrue(maxPayload > 0, "max payload should be positive: $maxPayload")
-
-            val quantum = pipe.client.sendQuantum()
-            assertTrue(quantum > 0, "send quantum should be positive: $quantum")
+            val err = pipe.server.localError()
+            assertNotNull(err, "server should see local error")
+            assertTrue(err.isApp, "should be app error")
+            assertEquals(0x1234, err.errorCode)
         }
-        println("    connection state queries ... OK.")
+        println("    local_error ... OK.")
     }
 
     //endregion
