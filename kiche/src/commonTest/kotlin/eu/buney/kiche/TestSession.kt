@@ -32,36 +32,42 @@ class TestSession(
 
         val DEFAULT_BODY = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 
-        fun new(): TestSession {
+        /** Default H3 DATAGRAM payload: 10 bytes [1..10]. */
+        val DEFAULT_DGRAM_DATA = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+        fun new(): TestSession = newWithQuicConfig()
+
+        /**
+         * Creates a session with custom QUIC-level config. The [configure]
+         * lambda is called on both client and server configs (server also
+         * gets cert/key loaded). Defaults match quiche's Session::new().
+         */
+        fun newWithQuicConfig(
+            configure: KicheConfig.() -> Unit = {
+                setInitialMaxData(1500)
+                setInitialMaxStreamDataBidiLocal(150)
+                setInitialMaxStreamDataBidiRemote(150)
+                setInitialMaxStreamDataUni(150)
+                setInitialMaxStreamsBidi(5)
+                setInitialMaxStreamsUni(5)
+                enableDgram(true, 3, 3)
+                setAckDelayExponent(8)
+            },
+        ): TestSession {
             val certDir = quicheCertDir()
 
-            // Separate configs: server has cert/key, client does not
             val serverQuicConfig = KicheConfig().apply {
                 loadCertChainFromPemFile("$certDir/cert.crt")
                 loadPrivKeyFromPemFile("$certDir/cert.key")
                 setApplicationProtos(H3_PROTOS)
-                setInitialMaxData(1500)
-                setInitialMaxStreamDataBidiLocal(150)
-                setInitialMaxStreamDataBidiRemote(150)
-                setInitialMaxStreamDataUni(150)
-                setInitialMaxStreamsBidi(5)
-                setInitialMaxStreamsUni(5)
                 verifyPeer(false)
-                enableDgram(true, 3, 3)
-                setAckDelayExponent(8)
+                configure()
             }
 
             val clientQuicConfig = KicheConfig().apply {
                 setApplicationProtos(H3_PROTOS)
-                setInitialMaxData(1500)
-                setInitialMaxStreamDataBidiLocal(150)
-                setInitialMaxStreamDataBidiRemote(150)
-                setInitialMaxStreamDataUni(150)
-                setInitialMaxStreamsBidi(5)
-                setInitialMaxStreamsUni(5)
                 verifyPeer(false)
-                enableDgram(true, 3, 3)
-                setAckDelayExponent(8)
+                configure()
             }
 
             val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
@@ -131,6 +137,59 @@ class TestSession(
 
     fun recvBodyServer(streamId: Long, buf: ByteArray): Int =
         server.recvBody(pipe.server, streamId, buf)
+
+    // --- H3 Datagram helpers ---
+    // H3 datagrams are QUIC datagrams with a varint flow_id prefix.
+
+    /** Sends an H3 datagram from client: varint(flowId) + DEFAULT_DGRAM_DATA. */
+    fun sendDgramClient(flowId: Long) {
+        pipe.client.dgramSend(encodeDgram(flowId), encodeDgram(flowId).size)
+        advance()
+    }
+
+    /** Sends an H3 datagram from server: varint(flowId) + DEFAULT_DGRAM_DATA. */
+    fun sendDgramServer(flowId: Long) {
+        pipe.server.dgramSend(encodeDgram(flowId), encodeDgram(flowId).size)
+        advance()
+    }
+
+    /** Receives an H3 datagram on client. Returns (totalLen, flowId, flowIdLen). */
+    fun recvDgramClient(buf: ByteArray): Triple<Int, Long, Int> {
+        val len = pipe.client.dgramRecv(buf, buf.size)
+        val (flowId, flowIdLen) = decodeVarint(buf)
+        return Triple(len, flowId, flowIdLen)
+    }
+
+    /** Receives an H3 datagram on server. Returns (totalLen, flowId, flowIdLen). */
+    fun recvDgramServer(buf: ByteArray): Triple<Int, Long, Int> {
+        val len = pipe.server.dgramRecv(buf, buf.size)
+        val (flowId, flowIdLen) = decodeVarint(buf)
+        return Triple(len, flowId, flowIdLen)
+    }
+
+    private fun encodeDgram(flowId: Long): ByteArray {
+        val varint = encodeVarint(flowId)
+        return varint + DEFAULT_DGRAM_DATA
+    }
+
+    /** Encodes a QUIC varint (only supports values 0..63 for simplicity). */
+    private fun encodeVarint(v: Long): ByteArray {
+        require(v in 0..63) { "only 1-byte varints supported in tests" }
+        return byteArrayOf(v.toByte())
+    }
+
+    /** Decodes a QUIC varint from the start of buf. Returns (value, length). */
+    private fun decodeVarint(buf: ByteArray): Pair<Long, Int> {
+        val first = buf[0].toInt() and 0xFF
+        val len = 1 shl (first shr 6)
+        // For 1-byte varints (values 0..63):
+        if (len == 1) return Pair((first and 0x3F).toLong(), 1)
+        // 2-byte (values up to 16383):
+        if (len == 2) return Pair(
+            (((first and 0x3F) shl 8) or (buf[1].toInt() and 0xFF)).toLong(), 2
+        )
+        error("varint > 2 bytes not supported in tests")
+    }
 
     override fun close() {
         client.close()
