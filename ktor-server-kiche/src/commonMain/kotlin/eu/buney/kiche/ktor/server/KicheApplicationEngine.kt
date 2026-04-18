@@ -153,7 +153,6 @@ public class KicheApplicationEngine(
         var connPeerPort = -1
         var connPeerSocketAddr: InetSocketAddress? = null // kept for drainSend (avoids ip→string round-trip)
         var connScope: CoroutineScope? = null // per-connection scope for response coroutines
-        val pendingResponses = mutableListOf<PendingResponse>()
 
         val sendBuf = ByteArray(65535)
 
@@ -164,10 +163,6 @@ public class KicheApplicationEngine(
                 mutex.withLock {
                     val c = conn ?: return@withLock
                     val peerAddr = connPeerSocketAddr ?: return@withLock
-                    val h3 = h3Conn
-                    if (h3 != null) {
-                        drivePendingResponses(h3, c, pendingResponses)
-                    }
                     drainSend(c, sendBuf, udpSocket, peerAddr)
                 }
             }
@@ -207,7 +202,6 @@ public class KicheApplicationEngine(
                             h3Config = null
                             conn = null
                             connPeerSocketAddr = null
-                            pendingResponses.clear()
                         }
                     }
 
@@ -237,7 +231,7 @@ public class KicheApplicationEngine(
                     // Poll H3 events and dispatch to Ktor pipeline
                     val h3 = h3Conn
                     if (h3 != null) {
-                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket, peerAddr, mutex, connScope!!)
+                        pollAndDispatch(h3, c, udpSocket, peerAddr, mutex, connScope!!)
                     }
 
                     sendSignal.trySend(Unit)
@@ -253,7 +247,6 @@ public class KicheApplicationEngine(
                         h3Config = null
                         conn = null
                         connPeerSocketAddr = null
-                        pendingResponses.clear()
                     }
                 }
             }
@@ -274,21 +267,11 @@ public class KicheApplicationEngine(
         val bodyParts = mutableListOf<ByteArray>()
     }
 
-    /** Tracks a response body that couldn't be fully sent due to flow control. */
-    private class PendingResponse(
-        val streamId: Long,
-        val body: ByteArray,
-        var offset: Int = 0,
-    )
-
     private val requests = mutableMapOf<Long, RequestState>()
 
     private fun pollAndDispatch(
         h3: KicheH3Connection,
         conn: KicheConnection,
-        remoteAddr: KicheAddress,
-        localAddr: KicheAddress,
-        pendingResponses: MutableList<PendingResponse>,
         udpSocket: BoundDatagramSocket,
         peerSocketAddr: InetSocketAddress,
         mutex: Mutex,
@@ -422,30 +405,6 @@ public class KicheApplicationEngine(
 
     private companion object {
         val H3_ALPN: ByteArray = byteArrayOf(2, 'h'.code.toByte(), '3'.code.toByte())
-
-        fun drivePendingResponses(
-            h3: KicheH3Connection,
-            conn: KicheConnection,
-            pendingResponses: MutableList<PendingResponse>,
-        ) {
-            val iter = pendingResponses.iterator()
-            while (iter.hasNext()) {
-                val pending = iter.next()
-                while (pending.offset < pending.body.size) {
-                    val chunk = pending.body.copyOfRange(pending.offset, pending.body.size)
-                    val sent = try {
-                        h3.sendBody(quicConn = conn, streamId = pending.streamId, body = chunk, fin = true)
-                    } catch (_: KicheException) {
-                        break
-                    }
-                    if (sent <= 0) break
-                    pending.offset += sent
-                }
-                if (pending.offset >= pending.body.size) {
-                    iter.remove()
-                }
-            }
-        }
 
         suspend fun drainSend(conn: KicheConnection, buf: ByteArray, socket: BoundDatagramSocket, peerAddr: InetSocketAddress) {
             while (true) {
