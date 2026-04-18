@@ -434,6 +434,9 @@ class KicheConnectionTest {
      * bytes on two streams (30 total), but a third stream send returns Done
      * because the connection-level flow control window is exhausted.
      *
+     * Note: streamSend returns -1 for Done (flow control exhausted) rather
+     * than throwing, matching the Rust API's Err(Done) return.
+     *
      * Note: the Rust test also asserts internal data_blocked_sent/recv counters
      * which are not exposed via the C API, so those checks are omitted.
      */
@@ -450,7 +453,7 @@ class KicheConnectionTest {
             assertEquals(15, pipe.client.streamSend(4, ByteArray(15), 15, fin = false))
             pipe.advance()
 
-            // Third stream: connection-level flow control exhausted → Done (-1)
+            // Third stream: connection-level flow control exhausted → Done
             assertEquals(-1, pipe.client.streamSend(8, ByteArray(1), 1, fin = false))
             pipe.advance()
 
@@ -479,7 +482,7 @@ class KicheConnectionTest {
         TestPipe.newWithSmallLimits().use { pipe ->
             pipe.handshake()
 
-            // Client opens 3 bidi streams (0, 4, 8) and sends data with fin.
+            // Client opens 2 bidi streams (0, 4) and sends data with fin.
             pipe.client.streamSend(0, "a".encodeToByteArray(), 1, fin = false)
             pipe.advance()
             pipe.client.streamSend(4, "a".encodeToByteArray(), 1, fin = false)
@@ -536,7 +539,7 @@ class KicheConnectionTest {
         TestPipe.newWithSmallLimits().use { pipe ->
             pipe.handshake()
 
-            // Client opens 3 uni streams (2, 6) and sends data with fin.
+            // Client opens 2 uni streams (2, 6) and sends data with fin.
             pipe.client.streamSend(2, "a".encodeToByteArray(), 1, fin = false)
             pipe.advance()
             pipe.client.streamSend(6, "a".encodeToByteArray(), 1, fin = false)

@@ -114,7 +114,7 @@ class KicheH3Test {
     //region h3/mod.rs:request_no_body_response_many_chunks (line 3793)
 
     /**
-     * Ported from tests.rs:request_no_body_response_many_chunks()
+     * Ported from h3/mod.rs:request_no_body_response_many_chunks()
      * Send a request with no body, get a response with multiple DATA frames.
      */
     @Test
@@ -406,6 +406,9 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.Finished, ev2.type)
 
             // Server tries to send body before headers → error
+            // Rust asserts Error::FrameUnexpected here. We cannot assert the
+            // specific H3 error yet because H3 error codes are currently mapped
+            // through KicheError (QUIC errors) instead of KicheH3Error — see TODO.
             assertFailsWith<KicheException> {
                 s.sendBodyServer(stream, fin = true)
             }
@@ -433,7 +436,8 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.GoAway, ev.type)
             assertEquals(4000, ev.streamId)
 
-            // Request after GOAWAY should fail
+            // Request after GOAWAY should fail.
+            // Rust asserts Error::FrameUnexpected here.
             assertFailsWith<KicheException> {
                 s.sendRequest(fin = true)
             }
@@ -631,7 +635,8 @@ class KicheH3Test {
             val stream1 = s.client.sendRequest(s.pipe.client, req, true)
             assertEquals(0L, stream1)
 
-            // Second request is blocked by connection-level flow control
+            // Second request is blocked by connection-level flow control.
+            // Rust asserts Error::StreamBlocked here.
             assertFailsWith<KicheException> {
                 s.client.sendRequest(s.pipe.client, req, true)
             }
