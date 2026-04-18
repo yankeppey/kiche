@@ -1,0 +1,8 @@
+headers      = quiche.h
+headerFilter = **
+package      = quiche.c
+
+staticLibraries = libquiche.a
+libraryPaths.ios_arm64 = ../build/quiche/iphoneos/arm64/lib
+libraryPaths.ios_simulator_arm64 = ../build/quiche/iphone/arm64/lib
+libraryPaths.ios_x64 = ../build/quiche/iphone/x86_64/lib
