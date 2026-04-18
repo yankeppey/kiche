@@ -1,31 +1,132 @@
 package eu.buney.kiche.ktor
 
+import eu.buney.kiche.ktor.server.KicheApplicationEngine
+import eu.buney.kiche.ktor.server.KicheQuic
 import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.server.engine.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import kotlin.test.*
 
 /**
- * Integration tests for the Kiche Ktor engine.
+ * Integration tests for the Kiche Ktor client engine.
  *
- * Modeled after Ktor's own OkHttpHttpClientTest — tests standard HTTP
- * client behavior over HTTP/3.
- *
- * Uses [QuicheTestServer] — a real HTTP/3 server on localhost backed by
- * quiche, so these tests exercise the full QUIC + H3 stack.
+ * Uses `embeddedServer(KicheQuic)` as the HTTP/3 server — full round-trip
+ * over real QUIC + UDP on localhost, same as Ktor's own engine tests.
  */
 class KicheHttpClientTest {
 
-    private lateinit var server: QuicheTestServer
+    private lateinit var server: EmbeddedServer<KicheApplicationEngine, KicheApplicationEngine.Configuration>
     private lateinit var client: HttpClient
+    private var serverPort: Int = 0
 
-    private val testUrl: String get() = "https://localhost:${server.actualPort}"
+    private val testUrl: String get() = "https://localhost:$serverPort"
 
     @BeforeTest
     fun setUp() {
-        server = QuicheTestServer()
+        val certDir = findCertDir()
+
+        server = embeddedServer(KicheQuic, port = 0) {
+            routing {
+                get("/hello") {
+                    call.respondText("hello")
+                }
+                get("/empty") {
+                    call.respondText("")
+                }
+                route("/echo-method") {
+                    handle {
+                        call.respondText(call.request.httpMethod.value)
+                    }
+                }
+                route("/echo-body") {
+                    handle {
+                        val body = call.receive<ByteArray>()
+                        call.respondBytes(body)
+                    }
+                }
+                route("/echo") {
+                    handle {
+                        val body = call.receive<ByteArray>()
+                        call.respondBytes(body)
+                    }
+                }
+                route("/status/{code}") {
+                    handle {
+                        val code = call.parameters["code"]?.toIntOrNull() ?: 400
+                        call.respond(HttpStatusCode.fromValue(code), "")
+                    }
+                }
+                route("/headers") {
+                    handle {
+                        val echoHeaders = HeadersBuilder()
+                        call.request.headers.forEach { name, values ->
+                            for (value in values) {
+                                echoHeaders.append("x-echo-$name", value)
+                            }
+                        }
+                        call.response.headers.apply {
+                            echoHeaders.build().forEach { name, values ->
+                                for (value in values) {
+                                    append(name, value)
+                                }
+                            }
+                        }
+                        call.respondText("")
+                    }
+                }
+                route("/content-type") {
+                    handle {
+                        val ct = call.request.contentType().toString()
+                        call.respondText(ct)
+                    }
+                }
+                route("/query") {
+                    handle {
+                        val queryString = call.request.queryString()
+                        call.respondText(queryString)
+                    }
+                }
+                get("/large/{size}") {
+                    val size = call.parameters["size"]?.toIntOrNull() ?: 0
+                    val body = ByteArray(size) { 'A'.code.toByte() }
+                    call.respondBytes(body)
+                }
+                get("/multi-header") {
+                    call.response.headers.append("x-multi", "value1")
+                    call.response.headers.append("x-multi", "value2")
+                    call.response.headers.append("x-multi", "value3")
+                    call.response.headers.append("x-single", "only")
+                    call.respondText("")
+                }
+            }
+        }
+        server.engine.configuration.certChainPath = "$certDir/cert.crt"
+        server.engine.configuration.privateKeyPath = "$certDir/cert.key"
+
+        server.start(wait = false)
+
+        runBlocking {
+            var attempts = 0
+            while (attempts < 50) {
+                val connectors = try { server.engine.resolvedConnectors() } catch (_: Exception) { emptyList() }
+                if (connectors.isNotEmpty()) {
+                    serverPort = connectors.first().port
+                    break
+                }
+                delay(100)
+                attempts++
+            }
+            require(serverPort > 0) { "Server did not start" }
+        }
+
         client = HttpClient(Kiche) {
             engine {
                 verifyPeer = false
@@ -36,7 +137,7 @@ class KicheHttpClientTest {
     @AfterTest
     fun tearDown() {
         client.close()
-        server.close()
+        server.stop(0, 1000)
     }
 
     //region Basic GET
@@ -409,4 +510,17 @@ class KicheHttpClientTest {
     }
 
     //endregion
+
+    companion object {
+        private fun findCertDir(): String {
+            val candidates = listOf(
+                "third_party/quiche/quiche/examples",
+                "../third_party/quiche/quiche/examples",
+            )
+            for (path in candidates) {
+                if (File(path, "cert.crt").exists()) return path
+            }
+            error("Cannot find quiche example certs. Searched: $candidates")
+        }
+    }
 }

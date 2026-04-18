@@ -16,6 +16,7 @@ kotlin {
             implementation(libs.kotlin.test)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.slf4j.simple)
+            implementation(project(":ktor-server-kiche"))
         }
     }
 }
