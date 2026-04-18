@@ -132,6 +132,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
 
             // Body sending state
             var bodyFinished = bodyChannel == null
+            val bodyReadBuf = if (bodyChannel != null) ByteArray(MAX_BODY_CHUNK) else null
             var pendingBody: ByteArray? = null
             var pendingOffset = 0
 
@@ -145,7 +146,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                 // Try to push body data (non-blocking: only reads what's already buffered)
                 if (!bodyFinished) {
                     val result = trySendBodyData(
-                        h3Conn, conn, streamId, bodyChannel!!,
+                        h3Conn, conn, streamId, bodyChannel!!, bodyReadBuf!!,
                         pendingBody, pendingOffset,
                     )
                     bodyFinished = result.finished
@@ -208,7 +209,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                 // After processing ACKs, flow control window may have opened — retry body send
                 if (!bodyFinished) {
                     val result = trySendBodyData(
-                        h3Conn, conn, streamId, bodyChannel!!,
+                        h3Conn, conn, streamId, bodyChannel!!, bodyReadBuf!!,
                         pendingBody, pendingOffset,
                     )
                     bodyFinished = result.finished
@@ -278,6 +279,7 @@ private suspend fun trySendBodyData(
     conn: KicheConnection,
     streamId: Long,
     bodyChannel: ByteReadChannel,
+    readBuf: ByteArray,
     pendingBody: ByteArray?,
     pendingOffset: Int,
 ): BodySendResult {
@@ -298,10 +300,9 @@ private suspend fun trySendBodyData(
     // Fill pending buffer from channel if empty
     if (curPending == null) {
         if (available > 0) {
-            val buf = ByteArray(MAX_BODY_CHUNK)
-            val n = bodyChannel.readAvailable(buf, 0, buf.size)
+            val n = bodyChannel.readAvailable(readBuf, 0, readBuf.size)
             if (n > 0) {
-                curPending = buf.copyOf(n)
+                curPending = readBuf.copyOf(n)
                 curOffset = 0
             }
         }
@@ -311,9 +312,11 @@ private suspend fun trySendBodyData(
             bodyChannel.closedCause?.let { throw it }
             try {
                 h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
-            } catch (_: KicheException) {
-                // Flow control blocked — retry next iteration
-                return BodySendResult(finished = false, pending = null, offset = 0)
+            } catch (e: KicheException) {
+                if (e.error.isRetryable) {
+                    return BodySendResult(finished = false, pending = null, offset = 0)
+                }
+                throw e
             }
             return BodySendResult(finished = true, pending = null, offset = 0)
         }
@@ -327,7 +330,8 @@ private suspend fun trySendBodyData(
 
         val sent = try {
             h3Conn.sendBody(conn, streamId, chunk, fin = false)
-        } catch (_: KicheException) {
+        } catch (e: KicheException) {
+            if (!e.error.isRetryable) throw e
             0
         }
 

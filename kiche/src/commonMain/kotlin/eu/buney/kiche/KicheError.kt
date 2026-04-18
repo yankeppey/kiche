@@ -25,6 +25,10 @@ enum class KicheError(val code: Int) {
     OptimisticAckDetected(-22),
     InvalidDcidInitialization(-23);
 
+    /** True for errors that indicate temporary backpressure (retry after draining). */
+    val isRetryable: Boolean
+        get() = this == Done || this == FlowControl
+
     companion object {
         fun fromCode(code: Int): KicheError? = entries.find { it.code == code }
     }
