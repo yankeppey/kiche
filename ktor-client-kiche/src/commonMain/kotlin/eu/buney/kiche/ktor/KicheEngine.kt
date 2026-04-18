@@ -319,19 +319,14 @@ private suspend fun trySendBodyData(
         }
     }
 
-    // Try to send pending data
+    // Try to send pending data — always with fin=false.
+    // The terminal fin=true is sent by the "channel is done" block above
+    // on the next call, once curPending is null and the channel is fully closed.
     if (curPending != null) {
-        val availableAfterSend = try {
-            bodyChannel.availableForRead
-        } catch (_: Throwable) {
-            0
-        }
-        val isLast = bodyChannel.isClosedForRead && availableAfterSend == 0
-
         val chunk = if (curOffset == 0) curPending else curPending.copyOfRange(curOffset, curPending.size)
 
         val sent = try {
-            h3Conn.sendBody(conn, streamId, chunk, fin = isLast)
+            h3Conn.sendBody(conn, streamId, chunk, fin = false)
         } catch (_: KicheException) {
             0
         }
@@ -341,7 +336,6 @@ private suspend fun trySendBodyData(
             if (curOffset >= curPending.size) {
                 curPending = null
                 curOffset = 0
-                if (isLast) return BodySendResult(finished = true, pending = null, offset = 0)
             }
         }
     }
