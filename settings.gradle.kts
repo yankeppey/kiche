@@ -1,4 +1,4 @@
-enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
+// enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS") // disabled: accessor collision between :kiche and :ktor-client-kiche
 pluginManagement {
     repositories {
         google()
@@ -15,7 +15,8 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "kiche-project"
+rootProject.name = "Kiche"
 include(
     ":kiche",
+    ":ktor-client-kiche",
 )
