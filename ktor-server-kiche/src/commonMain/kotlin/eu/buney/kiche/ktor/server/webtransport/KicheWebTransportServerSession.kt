@@ -116,7 +116,7 @@ internal class KicheWebTransportServerSession(
         cleanup()
     }
 
-    // ── Methods called by the engine event loop (under mutex) ──
+    //region Methods called by the engine event loop (under mutex)
 
     /** Called when the engine receives data on a QUIC stream belonging to this session. */
     fun onStreamData(streamId: Long, data: ByteArray) {
@@ -172,6 +172,8 @@ internal class KicheWebTransportServerSession(
             state.driveWriteLocked(conn)
         }
     }
+
+    //endregion
 
     private fun handleNewIncomingStream(streamId: Long, initialData: ByteArray) {
         // Determine stream type from QUIC stream ID:

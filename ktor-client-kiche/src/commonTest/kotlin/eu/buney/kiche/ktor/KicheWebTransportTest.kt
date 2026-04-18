@@ -90,7 +90,7 @@ class KicheWebTransportTest {
         testServer.stop()
     }
 
-    // ── Session lifecycle ──
+    //region Session lifecycle
 
     @Test
     fun `session connects and ready completes`() = runBlocking {
@@ -109,7 +109,9 @@ class KicheWebTransportTest {
         }
     }
 
-    // ── Bidirectional streams ──
+    //endregion
+
+    //region Bidirectional streams
 
     @Test
     fun `echo over bidirectional stream`() = runBlocking {
@@ -159,7 +161,9 @@ class KicheWebTransportTest {
         }
     }
 
-    // ── Datagrams ──
+    //endregion
+
+    //region Datagrams
 
     @Test
     fun `echo datagram`() = runBlocking {
@@ -194,7 +198,9 @@ class KicheWebTransportTest {
         }
     }
 
-    // ── HTTP/3 alongside WebTransport ──
+    //endregion
+
+    //region HTTP/3 alongside WebTransport
 
     @Test
     fun `HTTP request works alongside WebTransport routes`() = runBlocking {
@@ -208,6 +214,8 @@ class KicheWebTransportTest {
             httpClient.close()
         }
     }
+
+    //endregion
 }
 
 /** Reads all remaining bytes from a [ByteReadChannel]. */
