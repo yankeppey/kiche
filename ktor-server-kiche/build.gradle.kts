@@ -30,6 +30,34 @@ kotlin {
     }
 }
 
+// Generate cert path constant for iOS tests (simulator has host filesystem access)
+val generateTestConstants by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/iosTest/kotlin")
+    val certDir = rootDir.resolve("third_party/quiche/quiche/examples").absolutePath
+    outputs.dir(outputDir)
+    inputs.property("certDir", certDir)
+
+    doLast {
+        val dir = outputDir.get().asFile.resolve("eu/buney/kiche/ktor/server")
+        dir.mkdirs()
+        dir.resolve("TestConstants.kt").writeText(
+            """
+            |package eu.buney.kiche.ktor.server
+            |
+            |internal const val KICHE_QUICHE_CERT_DIR = "$certDir"
+            """.trimMargin()
+        )
+    }
+}
+
+kotlin.sourceSets.getByName("iosTest") {
+    kotlin.srcDir(layout.buildDirectory.dir("generated/iosTest/kotlin"))
+}
+
+tasks.matching { it.name.contains("compileTestKotlinIos") }.configureEach {
+    dependsOn(generateTestConstants)
+}
+
 // JVM tests need the quiche JNI native library on java.library.path
 tasks.named<Test>("jvmTest") {
     val buildJniMacosFolder = rootProject.layout.buildDirectory.dir("buildJniMacos")
