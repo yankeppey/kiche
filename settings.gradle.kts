@@ -19,4 +19,5 @@ rootProject.name = "Kiche"
 include(
     ":kiche",
     ":ktor-client-kiche",
+    ":ktor-server-kiche",
 )
