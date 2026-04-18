@@ -16,7 +16,7 @@ import kotlinx.io.*
 import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 
-@OptIn(InternalAPI::class, ExperimentalCoroutinesApi::class)
+@OptIn(InternalAPI::class)
 public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEngineBase("ktor-kiche") {
 
     override val supportedCapabilities: Set<HttpClientEngineCapability<*>> =
@@ -27,9 +27,6 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
     override val coroutineContext: CoroutineContext
 
     private val selectorManager = SelectorManager(Dispatchers.Default)
-
-    /** Single-threaded dispatcher for all quiche connection access (not thread-safe). */
-    private val quicheDispatcher = Dispatchers.Default.limitedParallelism(1)
 
     init {
         val parent = super.coroutineContext.job
@@ -44,7 +41,13 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         val host = data.url.host
         val port = data.url.port.takeIf { it != 0 } ?: DEFAULT_HTTPS_PORT
 
-        // Bind a UDP socket via ktor-network
+        // Resolve peer address via ktor-network (handles DNS + platform differences)
+        val peerSocketAddr = InetSocketAddress(host, port)
+        val peerIp = peerSocketAddr.resolveAddress()
+            ?: error("Failed to resolve address for $host")
+        val peer = KicheAddress(ip = peerIp, port = port)
+
+        // Bind a local UDP socket
         val udpSocket = aSocket(selectorManager).udp().bind(InetSocketAddress("0.0.0.0", 0))
         val localSocketAddr = udpSocket.localAddress as InetSocketAddress
         val local = KicheAddress(
@@ -52,13 +55,6 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
             port = localSocketAddr.port,
         )
 
-        val peerSocketAddr = InetSocketAddress(host, port)
-        // Resolve the peer address to raw bytes for quiche
-        val peerIp = peerSocketAddr.resolveAddress()
-            ?: error("Failed to resolve address for $host")
-        val peer = KicheAddress(ip = peerIp, port = port)
-
-        // Generate random SCID
         val scid = Random.nextBytes(16)
 
         val quicConfig = KicheConfig().apply {
@@ -78,10 +74,9 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         try {
             val conn = KicheConnection.connect(host, scid, local, peer, quicConfig)
             try {
-                val responseData = executeH3Request(
+                return executeH3Request(
                     conn, udpSocket, peerSocketAddr, local, peer, data, callContext, requestTime,
                 )
-                return responseData
             } finally {
                 conn.close()
             }
@@ -91,6 +86,12 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         }
     }
 
+    /**
+     * Drives the QUIC handshake, sends an H3 request, and polls for the response.
+     *
+     * All quiche calls within a single request are sequential (receive → process → send loop),
+     * so no additional synchronization is needed — each request owns its own connection.
+     */
     private suspend fun executeH3Request(
         conn: KicheConnection,
         udpSocket: BoundDatagramSocket,
@@ -100,7 +101,7 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         data: HttpRequestData,
         callContext: CoroutineContext,
         requestTime: GMTDate,
-    ): HttpResponseData = withContext(quicheDispatcher) {
+    ): HttpResponseData {
         val sendBuf = ByteArray(MAX_DATAGRAM_SIZE)
 
         // Drive initial QUIC handshake packets
@@ -142,7 +143,6 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
             var finished = false
 
             while (!finished && !conn.isClosed) {
-                // Receive packets with timeout
                 val dgram = withTimeoutOrNull(
                     conn.timeoutAsMillis().coerceIn(1, 1000)
                 ) {
@@ -203,14 +203,12 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
                 offset += part.size
             }
 
-            val channel = ByteReadChannel(responseBody)
-
-            HttpResponseData(
+            return HttpResponseData(
                 statusCode = responseStatus,
                 requestTime = requestTime,
                 headers = responseHeaders,
                 version = HttpProtocolVersion("HTTP", 3, 0),
-                body = channel,
+                body = ByteReadChannel(responseBody),
                 callContext = callContext,
             )
         } finally {
@@ -234,26 +232,19 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
     }
 }
 
-/**
- * Build H3 pseudo-headers + regular headers from a Ktor [HttpRequestData].
- */
 private fun buildH3Headers(data: HttpRequestData): List<KicheH3Header> {
     val headers = mutableListOf<KicheH3Header>()
-
-    // Pseudo-headers (must come first in HTTP/3)
     headers.add(KicheH3Header(":method", data.method.value))
     headers.add(KicheH3Header(":scheme", data.url.protocol.name))
     headers.add(KicheH3Header(":authority", data.url.hostWithPort))
     headers.add(KicheH3Header(":path", data.url.encodedPathAndQuery))
 
-    // Regular headers
     data.headers.forEach { name, values ->
         for (value in values) {
             headers.add(KicheH3Header(name, value))
         }
     }
 
-    // Content-Type / Content-Length from body
     data.body.contentType?.let {
         headers.add(KicheH3Header("content-type", it.toString()))
     }
@@ -264,9 +255,6 @@ private fun buildH3Headers(data: HttpRequestData): List<KicheH3Header> {
     return headers
 }
 
-/**
- * Parse H3 response headers into a status code and Ktor [Headers].
- */
 private fun parseResponseHeaders(h3Headers: List<KicheH3Header>): Pair<HttpStatusCode, Headers> {
     var status = HttpStatusCode.OK
     val builder = HeadersBuilder()
@@ -284,9 +272,6 @@ private fun parseResponseHeaders(h3Headers: List<KicheH3Header>): Pair<HttpStatu
     return status to builder.build()
 }
 
-/**
- * Drain all pending QUIC packets and send them via the ktor-network UDP socket.
- */
 private suspend fun drainSend(
     conn: KicheConnection,
     buf: ByteArray,

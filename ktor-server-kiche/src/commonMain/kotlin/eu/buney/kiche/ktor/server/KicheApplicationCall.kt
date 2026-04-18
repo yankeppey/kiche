@@ -1,7 +1,7 @@
 package eu.buney.kiche.ktor.server
 
-import eu.buney.kiche.KicheAddress
 import io.ktor.http.*
+import io.ktor.network.sockets.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.request.*
@@ -20,8 +20,8 @@ internal class KicheApplicationCall(
     path: String,
     h3Headers: List<Pair<String, String>>,
     requestBody: ByteArray,
-    remoteAddress: KicheAddress,
-    localAddress: KicheAddress,
+    remoteAddress: InetSocketAddress,
+    localAddress: InetSocketAddress,
     override val coroutineContext: CoroutineContext = Dispatchers.Default,
 ) : BaseApplicationCall(application), CoroutineScope {
 
@@ -60,8 +60,8 @@ internal class KicheApplicationRequest(
     private val path: String,
     h3Headers: List<Pair<String, String>>,
     body: ByteArray,
-    private val remoteAddress: KicheAddress,
-    private val localAddress: KicheAddress,
+    private val remoteAddress: InetSocketAddress,
+    private val localAddress: InetSocketAddress,
 ) : BaseApplicationRequest(call) {
 
     override val engineReceiveChannel: ByteReadChannel = ByteReadChannel(body)
@@ -97,36 +97,20 @@ internal class KicheApplicationRequest(
         override val scheme: String = this@KicheApplicationRequest.scheme
         override val version: String = "HTTP/3"
 
-        private val localAddrStr = formatAddress(this@KicheApplicationRequest.localAddress)
-        private val remoteAddrStr = formatAddress(this@KicheApplicationRequest.remoteAddress)
-
         override val localPort: Int get() = this@KicheApplicationRequest.localAddress.port
         override val serverPort: Int get() = authority?.substringAfterLast(":", localPort.toString())?.toIntOrNull() ?: localPort
-        override val localHost: String get() = localAddrStr
+        override val localHost: String get() = this@KicheApplicationRequest.localAddress.hostname
         override val serverHost: String get() = authority?.substringBeforeLast(":") ?: localHost
-        override val localAddress: String get() = localAddrStr
+        override val localAddress: String get() = this@KicheApplicationRequest.localAddress.hostname
 
         override val remotePort: Int get() = this@KicheApplicationRequest.remoteAddress.port
-        override val remoteHost: String get() = remoteAddrStr
-        override val remoteAddress: String get() = remoteAddrStr
+        override val remoteHost: String get() = this@KicheApplicationRequest.remoteAddress.hostname
+        override val remoteAddress: String get() = this@KicheApplicationRequest.remoteAddress.hostname
 
         @Deprecated("Use localPort or serverPort instead")
         override val host: String get() = serverHost
         @Deprecated("Use localPort or serverPort instead")
         override val port: Int get() = serverPort
-    }
-
-    companion object {
-        private fun formatAddress(addr: KicheAddress): String {
-            return if (addr.isIpv6) {
-                addr.ip.toList().chunked(2).joinToString(":") { (hi, lo) ->
-                    val v = ((hi.toInt() and 0xFF) shl 8) or (lo.toInt() and 0xFF)
-                    v.toString(16)
-                }
-            } else {
-                addr.ip.joinToString(".") { (it.toInt() and 0xFF).toString() }
-            }
-        }
     }
 }
 

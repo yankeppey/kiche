@@ -151,6 +151,7 @@ public class KicheApplicationEngine(
         var h3Conn: KicheH3Connection? = null
         var h3Config: KicheH3Config? = null
         var connPeerPort = -1
+        var connPeerSocketAddr: InetSocketAddress? = null // kept for drainSend (avoids ip→string round-trip)
         val pendingResponses = mutableListOf<PendingResponse>()
 
         val sendBuf = ByteArray(65535)
@@ -161,11 +162,12 @@ public class KicheApplicationEngine(
                 withTimeoutOrNull(10) { sendSignal.receive() }
                 mutex.withLock {
                     val c = conn ?: return@withLock
+                    val peerAddr = connPeerSocketAddr ?: return@withLock
                     val h3 = h3Conn
                     if (h3 != null) {
                         drivePendingResponses(h3, c, pendingResponses)
                     }
-                    drainSend(c, sendBuf, udpSocket)
+                    drainSend(c, sendBuf, udpSocket, peerAddr)
                 }
             }
         }
@@ -200,6 +202,7 @@ public class KicheApplicationEngine(
                             h3Conn = null
                             h3Config = null
                             conn = null
+                            connPeerSocketAddr = null
                             pendingResponses.clear()
                         }
                     }
@@ -207,6 +210,7 @@ public class KicheApplicationEngine(
                     // Accept new connection
                     if (conn == null) {
                         connPeerPort = fromPort
+                        connPeerSocketAddr = peerAddr
                         val scid = Random.nextBytes(16)
                         conn = KicheConnection.accept(
                             scid = scid, odcid = null,
@@ -226,7 +230,7 @@ public class KicheApplicationEngine(
                     // Poll H3 events and dispatch to Ktor pipeline
                     val h3 = h3Conn
                     if (h3 != null) {
-                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket)
+                        pollAndDispatch(h3, c, from, localAddr, pendingResponses, udpSocket, peerAddr)
                     }
 
                     sendSignal.trySend(Unit)
@@ -239,6 +243,7 @@ public class KicheApplicationEngine(
                         h3Conn = null
                         h3Config = null
                         conn = null
+                        connPeerSocketAddr = null
                         pendingResponses.clear()
                     }
                 }
@@ -275,6 +280,7 @@ public class KicheApplicationEngine(
         localAddr: KicheAddress,
         pendingResponses: MutableList<PendingResponse>,
         udpSocket: BoundDatagramSocket,
+        peerSocketAddr: InetSocketAddress,
     ) {
         while (true) {
             val event = h3.poll(quicConn = conn) ?: break
@@ -310,7 +316,7 @@ public class KicheApplicationEngine(
 
                 KicheH3EventType.Finished -> {
                     val state = requests.remove(event.streamId) ?: continue
-                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses, udpSocket)
+                    handleH3Request(h3, conn, event.streamId, state, remoteAddr, localAddr, pendingResponses, udpSocket, peerSocketAddr)
                 }
 
                 else -> {}
@@ -327,6 +333,7 @@ public class KicheApplicationEngine(
         localAddr: KicheAddress,
         pendingResponses: MutableList<PendingResponse>,
         udpSocket: BoundDatagramSocket,
+        peerSocketAddr: InetSocketAddress,
     ) {
         val application = applicationProvider()
 
@@ -339,14 +346,17 @@ public class KicheApplicationEngine(
             offset += part.size
         }
 
+        // Use InetSocketAddress for Ktor's RequestConnectionPoint (uses hostname directly)
+        val localSocketAddr = udpSocket.localAddress as InetSocketAddress
+
         val call = KicheApplicationCall(
             application = application,
             method = request.method,
             path = request.path,
             h3Headers = request.headers,
             requestBody = bodyBytes,
-            remoteAddress = remoteAddr,
-            localAddress = localAddr,
+            remoteAddress = peerSocketAddr,
+            localAddress = localSocketAddr,
         )
 
         scope.launch {
@@ -382,22 +392,12 @@ public class KicheApplicationEngine(
                     pendingResponses.add(PendingResponse(streamId, responseBody, offset = sent))
                 }
             }
-            drainSend(conn, sendBuf, udpSocket)
+            drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
         }
     }
 
     private companion object {
         val H3_ALPN: ByteArray = byteArrayOf(2, 'h'.code.toByte(), '3'.code.toByte())
-
-        fun formatIp(ip: ByteArray): String = if (ip.size == 4) {
-            ip.joinToString(".") { (it.toInt() and 0xFF).toString() }
-        } else {
-            // IPv6 — simplified
-            ip.toList().chunked(2).joinToString(":") { (hi, lo) ->
-                val v = ((hi.toInt() and 0xFF) shl 8) or (lo.toInt() and 0xFF)
-                v.toString(16)
-            }
-        }
 
         fun drivePendingResponses(
             h3: KicheH3Connection,
@@ -423,12 +423,11 @@ public class KicheApplicationEngine(
             }
         }
 
-        suspend fun drainSend(conn: KicheConnection, buf: ByteArray, socket: BoundDatagramSocket) {
+        suspend fun drainSend(conn: KicheConnection, buf: ByteArray, socket: BoundDatagramSocket, peerAddr: InetSocketAddress) {
             while (true) {
                 val result = conn.send(buf, buf.size) ?: break
                 val packet = Buffer().apply { write(buf, 0, result.written) }
-                val addr = InetSocketAddress(formatIp(result.to.ip), result.to.port)
-                socket.send(Datagram(packet, addr))
+                socket.send(Datagram(packet, peerAddr))
             }
         }
     }
