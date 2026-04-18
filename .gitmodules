@@ -1,3 +1,6 @@
 [submodule "third_party/quiche"]
 	path = third_party/quiche
 	url = https://github.com/cloudflare/quiche.git
+[submodule "third_party/ktor"]
+	path = third_party/ktor
+	url = https://github.com/ktorio/ktor.git
