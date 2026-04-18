@@ -327,7 +327,7 @@ public class KicheApplicationEngine(
                     while (true) {
                         val n = try {
                             h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
-                        } catch (_: KicheException) {
+                        } catch (_: KicheH3Exception) {
                             break
                         }
                         if (n <= 0) break
@@ -418,7 +418,7 @@ public class KicheApplicationEngine(
                             headers = responseHeaders, fin = !hasBody,
                         )
                         headersSent = true
-                    } catch (_: KicheException) {
+                    } catch (_: KicheH3Exception) {
                         // StreamBlocked or other retryable H3 error — retry after yield
                     }
                     drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
@@ -437,7 +437,7 @@ public class KicheApplicationEngine(
                         val chunk = responseBody.copyOfRange(offset, responseBody.size)
                         val sent = try {
                             h3.sendBody(quicConn = conn, streamId = streamId, body = chunk, fin = true)
-                        } catch (_: KicheException) {
+                        } catch (_: KicheH3Exception) {
                             0
                         }
                         if (sent > 0) offset += sent

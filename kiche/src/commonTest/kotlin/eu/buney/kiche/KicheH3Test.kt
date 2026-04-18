@@ -406,12 +406,11 @@ class KicheH3Test {
             assertEquals(KicheH3EventType.Finished, ev2.type)
 
             // Server tries to send body before headers → error
-            // Rust asserts Error::FrameUnexpected here. We cannot assert the
-            // specific H3 error yet because H3 error codes are currently mapped
-            // through KicheError (QUIC errors) instead of KicheH3Error — see TODO.
-            assertFailsWith<KicheException> {
+            // Rust asserts Error::FrameUnexpected here.
+            val ex = assertFailsWith<KicheH3Exception> {
                 s.sendBodyServer(stream, fin = true)
             }
+            assertEquals(KicheH3Error.FrameUnexpected, ex.h3Error)
 
             assertNull(s.pollClient())
         }
@@ -438,9 +437,10 @@ class KicheH3Test {
 
             // Request after GOAWAY should fail.
             // Rust asserts Error::FrameUnexpected here.
-            assertFailsWith<KicheException> {
+            val ex = assertFailsWith<KicheH3Exception> {
                 s.sendRequest(fin = true)
             }
+            assertEquals(KicheH3Error.FrameUnexpected, ex.h3Error)
         }
     }
 
@@ -637,9 +637,10 @@ class KicheH3Test {
 
             // Second request is blocked by connection-level flow control.
             // Rust asserts Error::StreamBlocked here.
-            assertFailsWith<KicheException> {
+            val ex = assertFailsWith<KicheH3Exception> {
                 s.client.sendRequest(s.pipe.client, req, true)
             }
+            assertEquals(KicheH3Error.StreamBlocked, ex.h3Error)
 
             s.advance()
 

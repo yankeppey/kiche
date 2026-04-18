@@ -94,9 +94,8 @@ internal class KicheEndpoint(
                 val h3 = h3Conn ?: error("H3 connection closed before request could be sent")
                 val id = try {
                     h3.sendRequest(quicConn = c, headers = headers, fin = bodyChannel == null)
-                } catch (e: KicheException) {
-                    // H3 StreamBlocked (-13) is mapped to KicheError.FinalSize
-                    // due to overlapping C error codes. Treat it as retryable.
+                } catch (e: KicheH3Exception) {
+                    if (!e.isRetryable) throw e
                     blocked = true
                     drainSendLocked()
                     return@withLock -1L
@@ -368,7 +367,7 @@ internal class KicheEndpoint(
                 while (true) {
                     val n = try {
                         h3.recvBody(quicConn = c, streamId = event.streamId, buf = recvBodyBuf)
-                    } catch (_: KicheException) {
+                    } catch (_: KicheH3Exception) {
                         break
                     }
                     if (n <= 0) break
@@ -626,8 +625,8 @@ private suspend fun trySendBodyData(
             // as a FINAL_SIZE protocol error.
             val rc = try {
                 h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
-            } catch (e: KicheException) {
-                if (e.error.isRetryable) -1 else throw e
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) -1 else throw e
             }
             if (rc < 0) {
                 // H3 couldn't send yet — retry next iteration after ACKs arrive.
@@ -642,8 +641,8 @@ private suspend fun trySendBodyData(
 
         val sent = try {
             h3Conn.sendBody(conn, streamId, chunk, fin = false)
-        } catch (e: KicheException) {
-            if (!e.error.isRetryable) throw e
+        } catch (e: KicheH3Exception) {
+            if (!e.isRetryable) throw e
             0
         }
 
