@@ -70,6 +70,14 @@ actual class KicheH3Connection actual constructor(
     }
 
     actual fun sendBody(quicConn: KicheConnection, streamId: Long, body: ByteArray, fin: Boolean): Int {
+        if (body.isEmpty()) {
+            // quiche_h3_send_body with zero length and fin=true sends a zero-length DATA frame.
+            // Kotlin/Native can't take addressOf(0) on an empty array, so pass null.
+            val rc = quiche_h3_send_body(h3(), quicConn.ptr!!.reinterpret(),
+                streamId.toULong(), null, 0u, fin)
+            if (rc < 0) KicheException.check(rc.toInt())
+            return rc.toInt()
+        }
         body.usePinned { pinned ->
             val rc = quiche_h3_send_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), pinned.addressOf(0).reinterpret(), body.size.toULong(), fin)
@@ -79,6 +87,7 @@ actual class KicheH3Connection actual constructor(
     }
 
     actual fun recvBody(quicConn: KicheConnection, streamId: Long, buf: ByteArray): Int {
+        if (buf.isEmpty()) return 0
         buf.usePinned { pinned ->
             val rc = quiche_h3_recv_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), pinned.addressOf(0).reinterpret(), buf.size.toULong())

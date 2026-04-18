@@ -119,24 +119,18 @@ public class KicheEngine(override val config: KicheEngineConfig) : HttpClientEng
         val h3Conn = KicheH3Connection(conn, h3Config)
 
         try {
-            // Build HTTP/3 request headers
+            // Build HTTP/3 request headers and resolve body bytes
             val headers = buildH3Headers(data)
-            val hasBody = data.body !is OutgoingContent.NoContent
+            val bodyBytes = when (val body = data.body) {
+                is OutgoingContent.NoContent -> null
+                is OutgoingContent.ByteArrayContent -> body.bytes().takeIf { it.isNotEmpty() }
+                else -> error("Unsupported request body type: ${body::class.simpleName}. Only ByteArrayContent is supported.")
+            }
 
-            val streamId = h3Conn.sendRequest(quicConn = conn, headers = headers, fin = !hasBody)
+            val streamId = h3Conn.sendRequest(quicConn = conn, headers = headers, fin = bodyBytes == null)
 
-            // Send body if present
-            if (hasBody) {
-                val bodyBytes = when (val body = data.body) {
-                    is OutgoingContent.ByteArrayContent -> body.bytes()
-                    is OutgoingContent.NoContent -> ByteArray(0)
-                    else -> error("Unsupported request body type: ${body::class.simpleName}. Only ByteArrayContent is supported.")
-                }
-                h3Conn.sendBody(
-                    quicConn = conn, streamId = streamId,
-                    body = if (bodyBytes.isNotEmpty()) bodyBytes else ByteArray(0),
-                    fin = true,
-                )
+            if (bodyBytes != null) {
+                h3Conn.sendBody(quicConn = conn, streamId = streamId, body = bodyBytes, fin = true)
             }
 
             drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
