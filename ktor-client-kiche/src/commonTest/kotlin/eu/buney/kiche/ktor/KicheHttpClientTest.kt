@@ -12,7 +12,6 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import java.io.File
 import kotlin.test.*
 
 /**
@@ -512,15 +511,6 @@ class KicheHttpClientTest {
     //endregion
 
     companion object {
-        private fun findCertDir(): String {
-            val candidates = listOf(
-                "third_party/quiche/quiche/examples",
-                "../third_party/quiche/quiche/examples",
-            )
-            for (path in candidates) {
-                if (File(path, "cert.crt").exists()) return path
-            }
-            error("Cannot find quiche example certs. Searched: $candidates")
-        }
+        private fun findCertDir(): String = quicheCertDir()
     }
 }

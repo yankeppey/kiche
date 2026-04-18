@@ -19,11 +19,11 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
+            implementation(libs.kotlinx.coroutines.core)
+            implementation(project(":ktor-server-kiche"))
         }
         jvmTest.dependencies {
-            implementation(libs.kotlinx.coroutines.core)
             implementation(libs.slf4j.simple)
-            implementation(project(":ktor-server-kiche"))
         }
     }
 }
