@@ -405,13 +405,25 @@ public class KicheApplicationEngine(
             val sendBuf = ByteArray(65535)
             val hasBody = responseBody.isNotEmpty()
 
-            // Send headers (and possibly small bodies) under the mutex
-            mutex.withLock {
-                h3.sendResponse(
-                    quicConn = conn, streamId = streamId,
-                    headers = responseHeaders, fin = !hasBody,
-                )
-                drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
+            // Send response headers under the mutex. The H3 layer may return
+            // StreamBlocked (mapped as error code -13 in quiche's C API) when the
+            // connection-level send capacity is temporarily exhausted. Retry until
+            // the congestion window opens via incoming ACKs from the recv loop.
+            var headersSent = false
+            while (!headersSent && !conn.isClosed) {
+                mutex.withLock {
+                    try {
+                        h3.sendResponse(
+                            quicConn = conn, streamId = streamId,
+                            headers = responseHeaders, fin = !hasBody,
+                        )
+                        headersSent = true
+                    } catch (_: KicheException) {
+                        // StreamBlocked or other retryable H3 error — retry after yield
+                    }
+                    drainSend(conn, sendBuf, udpSocket, peerSocketAddr)
+                }
+                if (!headersSent) yield()
             }
 
             // Send body in a loop, acquiring the mutex for each attempt.

@@ -139,6 +139,11 @@ class KicheTestServer {
                 val body = ByteArray(size) { 'A'.code.toByte() }
                 call.respondBytes(body)
             }
+            get("/delay/{ms}") {
+                val ms = call.parameters["ms"]?.toLongOrNull() ?: 0
+                delay(ms)
+                call.respondText("delayed $ms")
+            }
             get("/multi-header") {
                 call.response.headers.append("x-multi", "value1")
                 call.response.headers.append("x-multi", "value2")

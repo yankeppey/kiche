@@ -81,23 +81,40 @@ internal class KicheEndpoint(
 
         val responseDeferred = CompletableDeferred<HttpResponseData>()
 
-        // Register stream and flush under mutex (sendRequest mutates h3 state)
-        val streamId = mutex.withLock {
-            val c = conn ?: error("Connection closed before request could be sent")
-            val h3 = h3Conn ?: error("H3 connection closed before request could be sent")
-            val id = h3.sendRequest(quicConn = c, headers = headers, fin = bodyChannel == null)
-            streams[id] = StreamState(
-                streamId = id,
-                responseDeferred = responseDeferred,
-                requestTime = requestTime,
-                callContext = callContext,
-                bodyChannel = bodyChannel,
-                bodyReadBuf = if (bodyChannel != null) ByteArray(MAX_BODY_CHUNK) else null,
-            )
-            // Flush immediately so request headers hit the wire without waiting for event loop
-            drainSendLocked()
-            log("execute: registered stream $id, hasBody=${bodyChannel != null}, totalStreams=${streams.size}")
-            id
+        // Register stream and flush under mutex (sendRequest mutates h3 state).
+        // The H3 layer may return StreamBlocked (error code -13) when the
+        // connection-level send capacity is temporarily exhausted by other
+        // concurrent streams. Retry after yielding to let the event loop
+        // process ACKs and open the congestion window.
+        var streamId: Long
+        while (true) {
+            var blocked = false
+            streamId = mutex.withLock {
+                val c = conn ?: error("Connection closed before request could be sent")
+                val h3 = h3Conn ?: error("H3 connection closed before request could be sent")
+                val id = try {
+                    h3.sendRequest(quicConn = c, headers = headers, fin = bodyChannel == null)
+                } catch (e: KicheException) {
+                    // H3 StreamBlocked (-13) is mapped to KicheError.FinalSize
+                    // due to overlapping C error codes. Treat it as retryable.
+                    blocked = true
+                    drainSendLocked()
+                    return@withLock -1L
+                }
+                streams[id] = StreamState(
+                    streamId = id,
+                    responseDeferred = responseDeferred,
+                    requestTime = requestTime,
+                    callContext = callContext,
+                    bodyChannel = bodyChannel,
+                    bodyReadBuf = if (bodyChannel != null) ByteArray(MAX_BODY_CHUNK) else null,
+                )
+                drainSendLocked()
+                log("execute: registered stream $id, hasBody=${bodyChannel != null}, totalStreams=${streams.size}")
+                id
+            }
+            if (!blocked) break
+            yield()
         }
 
         try {
@@ -601,26 +618,20 @@ private suspend fun trySendBodyData(
             bodyChannel.closedCause?.let { throw it }
             // Send an empty DATA frame with FIN to close the H3 stream.
             // quiche's H3 send_body may return Done when stream capacity is
-            // exhausted (no room for the 2-byte DATA frame header). In that
-            // case, set the QUIC stream FIN directly via streamSend — the
-            // H3 layer doesn't require a trailing DATA frame, and the
-            // server's h3.poll() generates a Finished event from the QUIC FIN.
+            // temporarily exhausted (no room for the 2-byte DATA frame header).
+            // In that case, retry on the next event loop iteration — once the
+            // peer ACKs and the flow control window opens, send_body will succeed.
+            // Do NOT fall back to raw conn.streamSend() for FIN — bypassing the
+            // H3 layer sets FIN at an offset that the peer's H3 layer rejects
+            // as a FINAL_SIZE protocol error.
             val rc = try {
                 h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
             } catch (e: KicheException) {
                 if (e.error.isRetryable) -1 else throw e
             }
             if (rc < 0) {
-                // H3 couldn't send (likely Done due to flow control).
-                // Fall back to raw QUIC stream FIN.
-                try {
-                    conn.streamSend(streamId, ByteArray(0), 0, true)
-                } catch (e: KicheException) {
-                    if (e.error.isRetryable) {
-                        return BodySendResult(finished = false, pending = null, offset = 0)
-                    }
-                    throw e
-                }
+                // H3 couldn't send yet — retry next iteration after ACKs arrive.
+                return BodySendResult(finished = false, pending = null, offset = 0)
             }
             return BodySendResult(finished = true, pending = null, offset = 0)
         }
