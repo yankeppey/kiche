@@ -26,7 +26,7 @@ class KicheHttpClientTest {
     private lateinit var client: HttpClient
     private var serverPort: Int = 0
 
-    private val testUrl: String get() = "https://localhost:$serverPort"
+    private val testUrl: String get() = "https://127.0.0.1:$serverPort"
 
     @BeforeTest
     fun setUp() {

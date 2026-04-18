@@ -77,7 +77,7 @@ class KicheServerTest {
 
     @Test
     fun `GET hello from Kiche server`() = runBlocking {
-        val response = client.get("https://localhost:$serverPort/hello")
+        val response = client.get("https://127.0.0.1:$serverPort/hello")
         assertEquals(HttpStatusCode.OK, response.status)
         assertEquals("hello from kiche server", response.bodyAsText())
     }
@@ -85,7 +85,7 @@ class KicheServerTest {
     @Test
     fun `POST echo through Kiche server`() = runBlocking {
         val payload = "round trip test"
-        val response = client.post("https://localhost:$serverPort/echo") {
+        val response = client.post("https://127.0.0.1:$serverPort/echo") {
             setBody(payload)
         }
         assertEquals(HttpStatusCode.OK, response.status)
@@ -94,7 +94,7 @@ class KicheServerTest {
 
     @Test
     fun `response reports HTTP 3`() = runBlocking {
-        val response = client.get("https://localhost:$serverPort/hello")
+        val response = client.get("https://127.0.0.1:$serverPort/hello")
         assertEquals("HTTP", response.version.name)
         assertEquals(3, response.version.major)
     }
