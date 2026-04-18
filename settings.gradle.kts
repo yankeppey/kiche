@@ -18,6 +18,7 @@ dependencyResolutionManagement {
 rootProject.name = "Kiche"
 include(
     ":kiche",
+    ":ktor-kiche-webtransport",
     ":ktor-client-kiche",
     ":ktor-client-h3-adaptive",
     ":ktor-server-kiche",

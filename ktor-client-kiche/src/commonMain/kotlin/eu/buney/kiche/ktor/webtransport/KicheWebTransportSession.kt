@@ -515,4 +515,3 @@ private fun encodeVarint(value: Long, out: MutableList<Byte>) {
     }
 }
 
-class WebTransportException(message: String, cause: Throwable? = null) : Exception(message, cause)

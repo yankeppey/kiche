@@ -1,6 +1,7 @@
 package eu.buney.kiche.ktor.server
 
 import eu.buney.kiche.*
+import eu.buney.kiche.ktor.server.webtransport.*
 import io.ktor.events.*
 import io.ktor.network.selector.*
 import io.ktor.network.sockets.*
@@ -115,6 +116,7 @@ public class KicheApplicationEngine(
             setInitialMaxStreamDataUni(configuration.initialMaxStreamDataUni)
             setInitialMaxStreamsBidi(configuration.initialMaxStreamsBidi)
             setInitialMaxStreamsUni(configuration.initialMaxStreamsUni)
+            enableDgram(true, 65535, 65535)
         }
 
         val udpSocket = aSocket(selectorManager).udp().bind(InetSocketAddress(host, port))
@@ -189,6 +191,7 @@ public class KicheApplicationEngine(
                         val h3 = h3Conn
                         if (h3 != null && connScope != null) {
                             pollAndDispatch(h3, c, udpSocket, connPeerSocketAddr!!, mutex, connScope!!)
+                            driveWtSessionsLocked(c, udpSocket, connPeerSocketAddr!!, sendBuf)
                             drainSend(c, sendBuf, udpSocket, connPeerSocketAddr!!)
                         }
                         if (requests.isNotEmpty()) {
@@ -210,6 +213,7 @@ public class KicheApplicationEngine(
                     conn?.let { c ->
                         if (fromPort != connPeerPort) {
                             // Cancel in-flight response coroutines before freeing native objects
+                            wtSessions.clear()
                             connScope?.coroutineContext?.job?.cancelAndJoin()
                             connScope = null
                             h3Conn?.close()
@@ -242,7 +246,9 @@ public class KicheApplicationEngine(
 
                     // Create H3 connection once handshake completes
                     if (c.isEstablished && h3Conn == null) {
-                        h3Config = KicheH3Config()
+                        h3Config = KicheH3Config().apply {
+                            enableExtendedConnect(true)
+                        }
                         h3Conn = KicheH3Connection(c, h3Config!!)
                     }
 
@@ -250,6 +256,7 @@ public class KicheApplicationEngine(
                     val h3 = h3Conn
                     if (h3 != null) {
                         pollAndDispatch(h3, c, udpSocket, peerAddr, mutex, connScope!!)
+                        driveWtSessionsLocked(c, udpSocket, peerAddr, sendBuf)
                     }
 
                     // Flush outgoing packets (flow control updates, ACKs) immediately.
@@ -262,6 +269,7 @@ public class KicheApplicationEngine(
 
                     // Connection closed → cleanup
                     if (c.isClosed) {
+                        wtSessions.clear()
                         connScope?.coroutineContext?.job?.cancelAndJoin()
                         connScope = null
                         h3Conn?.close()
@@ -276,6 +284,7 @@ public class KicheApplicationEngine(
             }
         } finally {
             sendJob.cancel()
+            wtSessions.clear()
             connScope?.coroutineContext?.job?.cancelAndJoin()
             h3Conn?.close()
             conn?.close()
@@ -287,11 +296,15 @@ public class KicheApplicationEngine(
     private class RequestState {
         var method: String = "GET"
         var path: String = "/"
+        var protocol: String? = null
         val headers = mutableListOf<Pair<String, String>>()
         val bodyParts = mutableListOf<ByteArray>()
     }
 
     private val requests = mutableMapOf<Long, RequestState>()
+
+    /** Active WebTransport sessions keyed by CONNECT stream ID. */
+    private val wtSessions = mutableMapOf<Long, KicheWebTransportServerSession>()
 
     private fun pollAndDispatch(
         h3: KicheH3Connection,
@@ -306,6 +319,14 @@ public class KicheApplicationEngine(
 
             when (event.type) {
                 KicheH3EventType.Headers -> {
+                    // Check if this stream belongs to an active WT session
+                    val wtSession = findWtSessionForStream(event.streamId)
+                    if (wtSession != null) {
+                        // WT sub-stream headers — pass initial data to session
+                        slog("Headers stream=${event.streamId} → WT session")
+                        continue
+                    }
+
                     val state = RequestState()
                     event.headers?.forEach { header ->
                         val name = header.nameString
@@ -313,14 +334,39 @@ public class KicheApplicationEngine(
                         when (name) {
                             ":method" -> state.method = value
                             ":path" -> state.path = value
+                            ":protocol" -> state.protocol = value
                         }
                         state.headers.add(name to value)
                     }
                     requests[event.streamId] = state
-                    slog("Headers stream=${event.streamId} ${state.method} ${state.path}")
+                    slog("Headers stream=${event.streamId} ${state.method} ${state.path} protocol=${state.protocol}")
+
+                    // If this is a WebTransport CONNECT, handle immediately (no body expected)
+                    if (state.method == "CONNECT" && state.protocol == "webtransport") {
+                        requests.remove(event.streamId)
+                        handleWebTransportConnect(
+                            h3, conn, event.streamId, state,
+                            udpSocket, peerSocketAddr, mutex, connScope,
+                        )
+                    }
                 }
 
                 KicheH3EventType.Data -> {
+                    // Check if this is data on a WT session's CONNECT stream or sub-stream
+                    val wtSession = wtSessions[event.streamId]
+                    if (wtSession != null) {
+                        // Data on the CONNECT stream (capsule protocol / datagrams)
+                        val bodyBuf = ByteArray(65535)
+                        while (true) {
+                            val n = try {
+                                h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
+                            } catch (_: KicheException) { break }
+                            if (n <= 0) break
+                            wtSession.onDatagram(bodyBuf.copyOf(n))
+                        }
+                        continue
+                    }
+
                     val bodyBuf = ByteArray(65535)
                     val state = requests[event.streamId] ?: continue
                     var totalRead = 0
@@ -339,15 +385,197 @@ public class KicheApplicationEngine(
                 }
 
                 KicheH3EventType.Finished -> {
+                    // Check WT sessions
+                    val wtSession = wtSessions[event.streamId] ?: findWtSessionForStream(event.streamId)
+                    if (wtSession != null) {
+                        wtSession.onStreamFinished(event.streamId)
+                        if (event.streamId in wtSessions) {
+                            slog("Finished: WT CONNECT stream ${event.streamId} → removing session")
+                            wtSessions.remove(event.streamId)
+                        }
+                        continue
+                    }
+
                     val state = requests.remove(event.streamId) ?: continue
                     val bodySize = state.bodyParts.sumOf { it.size }
                     slog("Finished stream=${event.streamId} bodySize=$bodySize → handleH3Request")
                     handleH3Request(h3, conn, event.streamId, state, udpSocket, peerSocketAddr, mutex, connScope)
                 }
 
+                KicheH3EventType.Reset -> {
+                    val wtSession = wtSessions[event.streamId] ?: findWtSessionForStream(event.streamId)
+                    if (wtSession != null) {
+                        wtSession.onStreamReset(event.streamId)
+                        if (event.streamId in wtSessions) {
+                            wtSessions.remove(event.streamId)
+                        }
+                        continue
+                    }
+                    slog("Reset stream=${event.streamId}")
+                }
+
                 else -> {
                     slog("Other event type=${event.type} stream=${event.streamId}")
                 }
+            }
+        }
+    }
+
+    /**
+     * Drives outgoing writes and datagram sends for all active WT sessions,
+     * and reads incoming QUIC stream data for WT sub-streams.
+     * Called under mutex.
+     */
+    private fun driveWtSessionsLocked(
+        conn: KicheConnection,
+        udpSocket: BoundDatagramSocket,
+        peerAddr: InetSocketAddress,
+        sendBuf: ByteArray,
+    ) {
+        for (session in wtSessions.values) {
+            // Drive outgoing datagrams and stream writes
+            session.driveOutgoingLocked()
+
+            // Read data from readable QUIC streams belonging to this session
+            val readBuf = ByteArray(65535)
+            for (state in session.activeStreams.values.toList()) {
+                while (conn.streamReadable(state.streamId)) {
+                    val result = try {
+                        conn.streamRecv(state.streamId, readBuf, readBuf.size)
+                    } catch (_: KicheException) { break }
+                    if (result.read > 0) {
+                        session.onStreamData(state.streamId, readBuf.copyOf(result.read))
+                    }
+                    if (result.fin) {
+                        session.onStreamFinished(state.streamId)
+                        break
+                    }
+                }
+            }
+
+            // Check for new client-initiated streams (not yet in activeStreams)
+            while (true) {
+                val streamId = conn.streamReadableNext()
+                if (streamId < 0) break
+
+                // Skip streams already tracked by HTTP or other sessions
+                if (requests.containsKey(streamId)) continue
+                if (session.activeStreams.containsKey(streamId)) {
+                    // Already tracked — read data
+                    while (conn.streamReadable(streamId)) {
+                        val result = try {
+                            conn.streamRecv(streamId, readBuf, readBuf.size)
+                        } catch (_: KicheException) { break }
+                        if (result.read > 0) {
+                            session.onStreamData(streamId, readBuf.copyOf(result.read))
+                        }
+                        if (result.fin) {
+                            session.onStreamFinished(streamId)
+                            break
+                        }
+                    }
+                    continue
+                }
+
+                // New stream — read initial data and let session handle it
+                val result = try {
+                    conn.streamRecv(streamId, readBuf, readBuf.size)
+                } catch (_: KicheException) { break }
+                if (result.read > 0) {
+                    session.onStreamData(streamId, readBuf.copyOf(result.read))
+                }
+                if (result.fin) {
+                    session.onStreamFinished(streamId)
+                }
+            }
+
+            // Drain incoming QUIC datagrams
+            val dgramBuf = ByteArray(conn.dgramMaxWritableLen().toInt().coerceAtLeast(1))
+            while (conn.dgramRecvQueueLen() > 0) {
+                val n = try {
+                    conn.dgramRecv(dgramBuf, dgramBuf.size)
+                } catch (_: KicheException) { break }
+                if (n > 0) {
+                    session.onDatagram(dgramBuf.copyOf(n))
+                }
+            }
+        }
+    }
+
+    /** Finds a WT session that owns the given sub-stream ID, or null. */
+    private fun findWtSessionForStream(streamId: Long): KicheWebTransportServerSession? {
+        for (session in wtSessions.values) {
+            if (session.activeStreams.containsKey(streamId)) return session
+        }
+        return null
+    }
+
+    /**
+     * Handles an HTTP/3 Extended CONNECT with `:protocol = webtransport`.
+     * Creates a [KicheWebTransportServerSession] and dispatches the registered handler.
+     */
+    private fun handleWebTransportConnect(
+        h3: KicheH3Connection,
+        conn: KicheConnection,
+        streamId: Long,
+        request: RequestState,
+        udpSocket: BoundDatagramSocket,
+        peerSocketAddr: InetSocketAddress,
+        mutex: Mutex,
+        connScope: CoroutineScope,
+    ) {
+        val path = request.path
+        val app = applicationProvider()
+        val routes = app.attributes.getOrNull(WebTransportRoutesKey)
+        val handler = routes?.get(path)
+
+        if (handler == null) {
+            // No handler registered for this path — reject with 404
+            slog("handleWebTransportConnect: no handler for $path, rejecting")
+            val headers = listOf(KicheH3Header(":status", "404"))
+            h3.sendResponse(conn, streamId, headers, fin = true)
+            return
+        }
+
+        slog("handleWebTransportConnect: accepting WT session on $path (stream $streamId)")
+
+        val localSocketAddr = udpSocket.localAddress as InetSocketAddress
+        val call = KicheApplicationCall(
+            application = app,
+            method = "CONNECT",
+            path = path,
+            h3Headers = request.headers,
+            requestBody = ByteArray(0),
+            remoteAddress = peerSocketAddr,
+            localAddress = localSocketAddr,
+        )
+
+        val session = KicheWebTransportServerSession(
+            call = call,
+            sessionStreamId = streamId,
+            conn = conn,
+            h3Conn = h3,
+            mutex = mutex,
+            drainSend = { drainSend(conn, ByteArray(65535), udpSocket, peerSocketAddr) },
+            parentContext = connScope.coroutineContext,
+        )
+
+        // Accept: send 200 and register the session
+        session.acceptSessionLocked()
+        wtSessions[streamId] = session
+
+        // Launch the handler in the connection scope
+        connScope.launch {
+            try {
+                with(handler) { session.handle() }
+            } catch (e: Throwable) {
+                slog("WT handler error: ${e.message}")
+            } finally {
+                // Handler returned — close the session if still open
+                if (!session.closed.isCompleted) {
+                    session.close()
+                }
+                wtSessions.remove(streamId)
             }
         }
     }
