@@ -2,6 +2,7 @@ package eu.buney.kiche.ktor.server.webtransport
 
 import eu.buney.kiche.*
 import eu.buney.kiche.ktor.webtransport.*
+import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
 import io.ktor.server.application.*
 import io.ktor.utils.io.*
@@ -108,16 +109,9 @@ internal class KicheWebTransportServerSession(
         slog("close: code=${info.code}")
         mutex.withLock {
             try {
-                // Send close info as H3 body on the CONNECT stream:
-                // 4 bytes big-endian code + UTF-8 reason
-                val reasonBytes = info.reason.encodeToByteArray()
-                val closeData = ByteArray(4 + reasonBytes.size)
-                closeData[0] = (info.code shr 24).toByte()
-                closeData[1] = (info.code shr 16).toByte()
-                closeData[2] = (info.code shr 8).toByte()
-                closeData[3] = info.code.toByte()
-                reasonBytes.copyInto(closeData, 4)
-                h3Conn.sendBody(conn, sessionStreamId, closeData, true)
+                // Send CLOSE_WEBTRANSPORT_SESSION capsule on the CONNECT stream
+                val capsuleBytes = CloseWebTransportSession.encode(info)
+                h3Conn.sendBody(conn, sessionStreamId, capsuleBytes, true)
                 drainSend()
             } catch (_: Throwable) {
                 // Best effort — connection may already be closed
@@ -168,13 +162,14 @@ internal class KicheWebTransportServerSession(
 
     /** Drives outgoing datagrams and stream writes. Called by engine under mutex. */
     fun driveOutgoingLocked() {
-        // Flush outgoing datagrams
+        // Flush outgoing datagrams with Quarter Stream ID framing (RFC 9297)
         while (true) {
-            val data = _dgramOutgoing.tryReceive().getOrNull() ?: break
+            val payload = _dgramOutgoing.tryReceive().getOrNull() ?: break
             try {
-                conn.dgramSend(data, data.size)
+                val framed = HttpDatagram.encode(sessionStreamId, payload)
+                conn.dgramSend(framed, framed.size)
             } catch (_: KicheException) {
-                slog("driveOutgoing: dropped datagram (${data.size} bytes)")
+                slog("driveOutgoing: dropped datagram (${payload.size} bytes)")
             }
         }
 
@@ -225,10 +220,12 @@ internal class KicheWebTransportServerSession(
     }
 
     private fun buildStreamHeader(bidi: Boolean): ByteArray {
-        val buf = mutableListOf<Byte>()
-        buf.add(if (bidi) 0x41 else 0x54)
-        encodeVarint(sessionStreamId, buf)
-        return buf.toByteArray()
+        val signal = if (bidi) 0x41.toByte() else 0x54.toByte()
+        val sessionIdBytes = QuicVarint.encode(sessionStreamId)
+        val result = ByteArray(1 + sessionIdBytes.size)
+        result[0] = signal
+        sessionIdBytes.copyInto(result, 1)
+        return result
     }
 }
 
@@ -378,29 +375,3 @@ internal class ServerWebTransportStream(
     }
 }
 
-/** Encodes a Long as a QUIC variable-length integer. */
-private fun encodeVarint(value: Long, out: MutableList<Byte>) {
-    when {
-        value < 0x40 -> out.add(value.toByte())
-        value < 0x4000 -> {
-            out.add(((value shr 8) or 0x40).toByte())
-            out.add((value and 0xFF).toByte())
-        }
-        value < 0x40000000 -> {
-            out.add(((value shr 24) or 0x80).toByte())
-            out.add(((value shr 16) and 0xFF).toByte())
-            out.add(((value shr 8) and 0xFF).toByte())
-            out.add((value and 0xFF).toByte())
-        }
-        else -> {
-            out.add(((value shr 56) or 0xC0).toByte())
-            out.add(((value shr 48) and 0xFF).toByte())
-            out.add(((value shr 40) and 0xFF).toByte())
-            out.add(((value shr 32) and 0xFF).toByte())
-            out.add(((value shr 24) and 0xFF).toByte())
-            out.add(((value shr 16) and 0xFF).toByte())
-            out.add(((value shr 8) and 0xFF).toByte())
-            out.add((value and 0xFF).toByte())
-        }
-    }
-}

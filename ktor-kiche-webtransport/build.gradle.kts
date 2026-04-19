@@ -25,5 +25,14 @@ kotlin {
             api(libs.ktor.client.core)
             api(libs.kotlinx.coroutines.core)
         }
+        commonTest.dependencies {
+            implementation(libs.kotlin.test)
+        }
+    }
+}
+
+tasks.named<Test>("jvmTest") {
+    testLogging {
+        events("passed", "skipped", "failed")
     }
 }

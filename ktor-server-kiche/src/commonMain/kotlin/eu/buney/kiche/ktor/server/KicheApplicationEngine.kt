@@ -478,14 +478,20 @@ public class KicheApplicationEngine(
             // would steal bytes from H3 internal streams (control, QPACK) and
             // corrupt the H3 connection state.
 
-            // Drain incoming QUIC datagrams (not H3-managed)
+            // Drain incoming QUIC datagrams — strip Quarter Stream ID (RFC 9297)
             val dgramBuf = ByteArray(conn.dgramMaxWritableLen().toInt().coerceAtLeast(1))
             while (conn.dgramRecvQueueLen() > 0) {
                 val n = try {
                     conn.dgramRecv(dgramBuf, dgramBuf.size)
                 } catch (_: KicheException) { break }
                 if (n > 0) {
-                    session.onDatagram(dgramBuf.copyOf(n))
+                    val decoded = eu.buney.kiche.ktor.webtransport.capsule.HttpDatagram.decode(
+                        dgramBuf.copyOf(n)
+                    )
+                    if (decoded != null) {
+                        val (_, payload) = decoded
+                        session.onDatagram(payload)
+                    }
                 }
             }
         }

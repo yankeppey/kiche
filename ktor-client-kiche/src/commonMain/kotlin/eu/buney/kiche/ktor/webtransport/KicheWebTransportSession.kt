@@ -1,6 +1,7 @@
 package eu.buney.kiche.ktor.webtransport
 
 import eu.buney.kiche.*
+import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
@@ -154,14 +155,10 @@ internal class KicheWebTransportSession(
         log("close: code=${info.code} reason=${info.reason}")
         try {
             mutex.withLock {
-                // Close the CONNECT stream to end the WT session
                 if (sessionStreamId >= 0 && !conn.isClosed) {
-                    conn.streamSend(
-                        sessionStreamId,
-                        ByteArray(0),
-                        0,
-                        true
-                    )
+                    // Send CLOSE_WEBTRANSPORT_SESSION capsule on the CONNECT stream
+                    val capsuleBytes = CloseWebTransportSession.encode(info)
+                    h3Conn.sendBody(conn, sessionStreamId, capsuleBytes, true)
                     drainSendLocked()
                 }
             }
@@ -375,12 +372,13 @@ internal class KicheWebTransportSession(
     /** Drains outgoing datagrams from the send channel. Called under mutex. */
     private fun driveOutgoingDatagramsLocked() {
         while (true) {
-            val data = _dgramOutgoing.tryReceive().getOrNull() ?: break
+            val payload = _dgramOutgoing.tryReceive().getOrNull() ?: break
             try {
-                conn.dgramSend(data, data.size)
+                val framed = HttpDatagram.encode(sessionStreamId, payload)
+                conn.dgramSend(framed, framed.size)
             } catch (_: KicheException) {
                 // Queue full or error — drop the datagram (unreliable)
-                log("driveOutgoingDatagrams: dropped datagram (${data.size} bytes)")
+                log("driveOutgoingDatagrams: dropped datagram (${payload.size} bytes)")
             }
         }
     }
@@ -393,7 +391,15 @@ internal class KicheWebTransportSession(
                 conn.dgramRecv(buf, buf.size)
             } catch (_: KicheException) { break }
             if (n > 0) {
-                _dgramIncoming.trySend(buf.copyOf(n))
+                // Strip Quarter Stream ID prefix (RFC 9297)
+                val decoded = HttpDatagram.decode(buf.copyOf(n))
+                if (decoded != null) {
+                    val (streamId, payload) = decoded
+                    // Only accept datagrams for our session
+                    if (streamId == sessionStreamId) {
+                        _dgramIncoming.trySend(payload)
+                    }
+                }
             }
         }
     }
@@ -405,24 +411,26 @@ internal class KicheWebTransportSession(
         }
     }
 
-    /** Flushes QUIC packets. Called under mutex. */
-    /** Parses close info from accumulated CONNECT stream body data. */
+    /** Parses close info from accumulated CONNECT stream body data (capsule-framed). */
     private fun parseCloseInfo(): WebTransportCloseInfo? {
         if (connectStreamBody.isEmpty()) return null
         val totalSize = connectStreamBody.sumOf { it.size }
-        if (totalSize < 4) return null
+        if (totalSize == 0) return null
         val data = ByteArray(totalSize)
         var offset = 0
         for (part in connectStreamBody) {
             part.copyInto(data, offset)
             offset += part.size
         }
-        val code = ((data[0].toUInt() and 0xFFu) shl 24) or
-                ((data[1].toUInt() and 0xFFu) shl 16) or
-                ((data[2].toUInt() and 0xFFu) shl 8) or
-                (data[3].toUInt() and 0xFFu)
-        val reason = if (data.size > 4) data.copyOfRange(4, data.size).decodeToString() else ""
-        return WebTransportCloseInfo(code, reason)
+        // Parse capsules — look for CLOSE_WEBTRANSPORT_SESSION
+        val (capsules, _) = parseAllCapsules(data)
+        for (capsule in capsules) {
+            if (capsule.type == CapsuleType.CLOSE_WEBTRANSPORT_SESSION) {
+                return CloseWebTransportSession.decode(capsule.value)
+            }
+            // Unknown capsule types are silently skipped (RFC 9297 §3.2)
+        }
+        return null
     }
 
     private fun drainSendLocked() {
@@ -437,35 +445,6 @@ internal class KicheWebTransportSession(
 
     companion object {
         const val MAX_DATAGRAM_SIZE = 65535
-    }
-}
-
-/** Encodes a Long as a QUIC variable-length integer. */
-private fun encodeVarint(value: Long, out: MutableList<Byte>) {
-    when {
-        value < 0x40 -> {
-            out.add(value.toByte())
-        }
-        value < 0x4000 -> {
-            out.add(((value shr 8) or 0x40).toByte())
-            out.add((value and 0xFF).toByte())
-        }
-        value < 0x40000000 -> {
-            out.add(((value shr 24) or 0x80).toByte())
-            out.add(((value shr 16) and 0xFF).toByte())
-            out.add(((value shr 8) and 0xFF).toByte())
-            out.add((value and 0xFF).toByte())
-        }
-        else -> {
-            out.add(((value shr 56) or 0xC0).toByte())
-            out.add(((value shr 48) and 0xFF).toByte())
-            out.add(((value shr 40) and 0xFF).toByte())
-            out.add(((value shr 32) and 0xFF).toByte())
-            out.add(((value shr 24) and 0xFF).toByte())
-            out.add(((value shr 16) and 0xFF).toByte())
-            out.add(((value shr 8) and 0xFF).toByte())
-            out.add((value and 0xFF).toByte())
-        }
     }
 }
 
