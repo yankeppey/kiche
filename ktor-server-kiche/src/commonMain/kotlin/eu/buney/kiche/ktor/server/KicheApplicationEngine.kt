@@ -186,9 +186,14 @@ public class KicheApplicationEngine(
         val wtSessions = mutableMapOf<Long, KicheWebTransportServerSession>()
         val pendingSubStreams = mutableListOf<PendingSubStream>()
 
-        suspend fun cleanup() {
+        /**
+         * Cancels child coroutines and frees native objects. Safe to call under mutex —
+         * uses cancel() (non-blocking) instead of cancelAndJoin() to avoid deadlock
+         * with children that acquire the same mutex.
+         */
+        fun cleanup() {
             wtSessions.clear()
-            connScope.coroutineContext.job.cancelAndJoin()
+            connScope.cancel()
             h3Conn?.close()
             conn.close()
             h3Config?.close()
@@ -361,8 +366,8 @@ public class KicheApplicationEngine(
                     // Connection closed → cleanup
                     if (cs.conn.isClosed || cs.conn.isTimedOut) {
                         slog("recv cleanup: removing connection dcid=${cs.dcid.toHexString()} closed=${cs.conn.isClosed} timedOut=${cs.conn.isTimedOut}")
-                        cs.cleanup()
                         connections.remove(ConnectionId(cs.dcid))
+                        cs.cleanup()
                     }
                 }
             }
