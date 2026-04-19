@@ -1,5 +1,7 @@
 package eu.buney.kiche
 
+import kotlin.jvm.JvmStatic
+
 enum class KicheH3EventType(val value: Int) {
     Headers(0),
     Data(1),

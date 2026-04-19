@@ -1,5 +1,7 @@
 package eu.buney.kiche
 
+import kotlin.jvm.JvmStatic
+
 /**
  * Exception thrown by HTTP/3 operations ([KicheH3Connection]).
  *

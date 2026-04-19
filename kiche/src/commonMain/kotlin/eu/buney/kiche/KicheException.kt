@@ -1,5 +1,7 @@
 package eu.buney.kiche
 
+import kotlin.jvm.JvmStatic
+
 class KicheException(
     val error: KicheError,
     message: String = "quiche error: ${error.name} (${error.code})",
