@@ -8,6 +8,7 @@
 package eu.buney.kiche
 
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class KicheConfigTest {
@@ -50,6 +51,12 @@ class KicheConfigTest {
         val version = Kiche.quicheVersion()
         assertTrue(version.isNotEmpty(), "quiche version should not be empty")
         assertTrue(version.contains("."), "version should contain a dot: $version")
+    }
+
+    @Test
+    fun testEnableDebugLogging() {
+        assertTrue(Kiche.enableDebugLogging(), "first call should succeed")
+        assertFalse(Kiche.enableDebugLogging(), "second call should fail (already enabled)")
     }
 
     //endregion
