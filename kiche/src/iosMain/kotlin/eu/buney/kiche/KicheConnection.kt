@@ -5,6 +5,7 @@ package eu.buney.kiche
 import kotlinx.cinterop.*
 import platform.posix.*
 import quiche.c.*
+import quiche.c.quiche_path_event_type.*
 
 actual class KicheConnection private constructor(internal var ptr: COpaquePointer?) : AutoCloseable {
 
@@ -328,7 +329,6 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                             quiche_path_event_closed(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
                         QUICHE_PATH_EVENT_PEER_MIGRATED ->
                             quiche_path_event_peer_migrated(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
-                        else -> error("Unknown path event type: $type")
                     }
                     val local = extractSockaddr(localSs.ptr)
                     val peer = extractSockaddr(peerSs.ptr)
@@ -338,7 +338,6 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                         QUICHE_PATH_EVENT_FAILED_VALIDATION -> KichePathEvent.FailedValidation(local, peer)
                         QUICHE_PATH_EVENT_CLOSED -> KichePathEvent.Closed(local, peer)
                         QUICHE_PATH_EVENT_PEER_MIGRATED -> KichePathEvent.PeerMigrated(local, peer)
-                        else -> error("Unknown path event type: $type")
                     }
                 }
             }
@@ -376,8 +375,8 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
         val peerSs = alloc<sockaddr_storage>()
         val peerLen = fillSockaddr(peerSs.ptr, peer)
         quiche_conn_send_quantum_on_path(conn(),
-            localSs.ptr.reinterpret(), localLen.toULong(),
-            peerSs.ptr.reinterpret(), peerLen.toULong()).toLong()
+            localSs.ptr.reinterpret(), localLen,
+            peerSs.ptr.reinterpret(), peerLen).toLong()
     }
 
     actual fun sendAckElicitingOnPath(local: KicheAddress, peer: KicheAddress): Boolean = memScoped {
@@ -386,8 +385,8 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
         val peerSs = alloc<sockaddr_storage>()
         val peerLen = fillSockaddr(peerSs.ptr, peer)
         val rc = quiche_conn_send_ack_eliciting_on_path(conn(),
-            localSs.ptr.reinterpret(), localLen.toULong(),
-            peerSs.ptr.reinterpret(), peerLen.toULong())
+            localSs.ptr.reinterpret(), localLen,
+            peerSs.ptr.reinterpret(), peerLen)
         if (rc < 0) KicheException.check(rc.toInt())
         rc == 0L
     }
