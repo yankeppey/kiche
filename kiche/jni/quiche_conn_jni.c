@@ -100,9 +100,8 @@ JNI_FN(PKG, KicheConnection, nativeRecv)(JNIEnv *env, jobject self, jlong handle
     return (jint)rc;
 }
 
-// Returns [written, fromIp, fromPort, toIp, toPort, atNanos] encoded in a long array,
-// or null if DONE.
-JNIEXPORT jlongArray JNICALL
+// Returns a KicheSendResult Java object, or null if DONE.
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativeSend)(JNIEnv *env, jobject self, jlong handle,
         jbyteArray buf, jint len) {
     jbyte *b = (*env)->GetByteArrayElements(env, buf, NULL);
@@ -111,65 +110,9 @@ JNI_FN(PKG, KicheConnection, nativeSend)(JNIEnv *env, jobject self, jlong handle
     (*env)->ReleaseByteArrayElements(env, buf, b, 0);
 
     if (written == QUICHE_ERR_DONE) return NULL;
-    if (written < 0) return NULL; // caller checks
+    if (written < 0) { throw_kiche_exception(env, (int)written); return NULL; }
 
-    // Extract addresses from send_info
-    uint8_t from_ip[16], to_ip[16];
-    int from_ip_len, to_ip_len, from_port, to_port;
-    extract_sockaddr(&si.from, from_ip, &from_ip_len, &from_port);
-    extract_sockaddr(&si.to, to_ip, &to_ip_len, &to_port);
-
-    // Pack: [written, atNanos, fromIpLen, fromPort, toIpLen, toPort, fromIp..., toIp...]
-    // We'll return it differently: written as return value, addresses as output objects.
-    // Actually, let's use a simpler approach: return a byte array with all the info packed.
-    // For now, return written and set send_info fields via a result object.
-
-    // Build result: long[3] = {written, atNanos, 0} + create address objects
-    long at_nanos = (long)si.at.tv_sec * 1000000000L + (long)si.at.tv_nsec;
-
-    // We need to return both the written count and the addresses.
-    // Use a helper method to construct KicheSendResult on the Java side.
-    // For simplicity, we'll encode everything in a byte array.
-    // Actually, let's just store send_info data in instance fields and read them back.
-
-    // Store addresses in thread-local statics and let Kotlin read them.
-    // Simplest: return written, and store send_info in the object.
-
-    // Let's take the simplest approach: return a long array with all data packed.
-    // [written, atNanos, fromFamily, fromPort, toFamily, toPort]
-    // and copy IP bytes into separate byte arrays set on the connection object.
-
-    // Actually, the cleanest JNI approach: return written, pass the send info
-    // via output arrays that Kotlin pre-allocates.
-    // But for now, let's return the data packed into a result.
-
-    jlongArray result = (*env)->NewLongArray(env, 2);
-    jlong vals[2] = { written, at_nanos };
-    (*env)->SetLongArrayRegion(env, result, 0, 2, vals);
-
-    // Store from/to addresses in object fields
-    static jclass connCls = NULL;
-    static jfieldID fFromIp = NULL, fFromPort = NULL, fToIp = NULL, fToPort = NULL;
-    if (!connCls) {
-        connCls = (*env)->FindClass(env, "eu/buney/kiche/KicheConnection");
-        connCls = (jclass)(*env)->NewGlobalRef(env, (jobject)connCls);
-        fFromIp = (*env)->GetFieldID(env, connCls, "sendFromIp", "[B");
-        fFromPort = (*env)->GetFieldID(env, connCls, "sendFromPort", "I");
-        fToIp = (*env)->GetFieldID(env, connCls, "sendToIp", "[B");
-        fToPort = (*env)->GetFieldID(env, connCls, "sendToPort", "I");
-    }
-
-    jbyteArray fromIpArr = (*env)->NewByteArray(env, from_ip_len);
-    (*env)->SetByteArrayRegion(env, fromIpArr, 0, from_ip_len, (const jbyte *)from_ip);
-    (*env)->SetObjectField(env, self, fFromIp, fromIpArr);
-    (*env)->SetIntField(env, self, fFromPort, from_port);
-
-    jbyteArray toIpArr = (*env)->NewByteArray(env, to_ip_len);
-    (*env)->SetByteArrayRegion(env, toIpArr, 0, to_ip_len, (const jbyte *)to_ip);
-    (*env)->SetObjectField(env, self, fToIp, toIpArr);
-    (*env)->SetIntField(env, self, fToPort, to_port);
-
-    return result;
+    return make_send_result(env, (int)written, &si);
 }
 
 // --- Streams ---
@@ -774,29 +717,41 @@ JNI_FN(PKG, KicheConnection, nativeMigrate)(JNIEnv *env, jobject self, jlong han
     return (jlong)seq;
 }
 
-// Path event: eagerly extracts all data, frees the C event, returns encoded result.
-// For simple events (New/Validated/FailedValidation/Closed/PeerMigrated):
-//   long[3] = {type, localPort, peerPort}
-//   + pathEventLocalIp/pathEventPeerIp fields set on the Java object
-// For ReusedSourceConnectionId:
-//   long[7] = {type, id, oldLocalPort, oldPeerPort, localPort, peerPort, 0}
-//   + all 4 ip fields set
-// Returns NULL if no event.
-JNIEXPORT jlongArray JNICALL
+// Returns a KichePathEvent subclass, or NULL if no event pending.
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativePathEventNext)(JNIEnv *env, jobject self, jlong handle) {
     quiche_path_event *ev = quiche_conn_path_event_next(CONN(handle));
     if (!ev) return NULL;
 
-    enum quiche_path_event_type type = quiche_path_event_type(ev);
+    // Cached class/ctor IDs for the 5 simple event subclasses (local, peer) and ReusedSourceConnectionId
+    static jclass clsNew = NULL, clsValidated = NULL, clsFailedValidation = NULL,
+                  clsClosed = NULL, clsPeerMigrated = NULL, clsReused = NULL;
+    static jmethodID ctorSimple = NULL, ctorReused = NULL;
+    if (!clsNew) {
+        const char *simpleCtorSig = "(Leu/buney/kiche/KicheAddress;Leu/buney/kiche/KicheAddress;)V";
+        #define CACHE_SIMPLE(var, name) \
+            var = (*env)->FindClass(env, "eu/buney/kiche/KichePathEvent$" name); \
+            var = (jclass)(*env)->NewGlobalRef(env, (jobject)var);
+        CACHE_SIMPLE(clsNew, "New")
+        CACHE_SIMPLE(clsValidated, "Validated")
+        CACHE_SIMPLE(clsFailedValidation, "FailedValidation")
+        CACHE_SIMPLE(clsClosed, "Closed")
+        CACHE_SIMPLE(clsPeerMigrated, "PeerMigrated")
+        #undef CACHE_SIMPLE
+        ctorSimple = (*env)->GetMethodID(env, clsNew, "<init>", simpleCtorSig);
 
-    jclass cls = (*env)->GetObjectClass(env, self);
-    jfieldID fLocalIp = (*env)->GetFieldID(env, cls, "pathEventLocalIp", "[B");
-    jfieldID fPeerIp = (*env)->GetFieldID(env, cls, "pathEventPeerIp", "[B");
+        clsReused = (*env)->FindClass(env, "eu/buney/kiche/KichePathEvent$ReusedSourceConnectionId");
+        clsReused = (jclass)(*env)->NewGlobalRef(env, (jobject)clsReused);
+        ctorReused = (*env)->GetMethodID(env, clsReused, "<init>",
+            "(JLeu/buney/kiche/KicheAddress;Leu/buney/kiche/KicheAddress;"
+            "Leu/buney/kiche/KicheAddress;Leu/buney/kiche/KicheAddress;)V");
+    }
+
+    enum quiche_path_event_type type = quiche_path_event_type(ev);
+    uint8_t ip_buf[16]; int ip_len, port;
+    jobject result = NULL;
 
     if (type == QUICHE_PATH_EVENT_REUSED_SOURCE_CONNECTION_ID) {
-        jfieldID fOldLocalIp = (*env)->GetFieldID(env, cls, "pathEventOldLocalIp", "[B");
-        jfieldID fOldPeerIp = (*env)->GetFieldID(env, cls, "pathEventOldPeerIp", "[B");
-
         uint64_t id;
         struct sockaddr_storage old_local_ss, old_peer_ss, local_ss, peer_ss;
         socklen_t old_local_len, old_peer_len, local_len, peer_len;
@@ -805,79 +760,61 @@ JNI_FN(PKG, KicheConnection, nativePathEventNext)(JNIEnv *env, jobject self, jlo
             &local_ss, &local_len, &peer_ss, &peer_len);
         quiche_path_event_free(ev);
 
-        uint8_t ip_buf[16]; int ip_len, port;
-
         extract_sockaddr(&old_local_ss, ip_buf, &ip_len, &port);
-        jbyteArray arr = (*env)->NewByteArray(env, ip_len);
-        (*env)->SetByteArrayRegion(env, arr, 0, ip_len, (const jbyte *)ip_buf);
-        (*env)->SetObjectField(env, self, fOldLocalIp, arr);
-        int old_local_port = port;
-
+        jobject oldLocal = make_kiche_address(env, ip_buf, ip_len, port);
         extract_sockaddr(&old_peer_ss, ip_buf, &ip_len, &port);
-        arr = (*env)->NewByteArray(env, ip_len);
-        (*env)->SetByteArrayRegion(env, arr, 0, ip_len, (const jbyte *)ip_buf);
-        (*env)->SetObjectField(env, self, fOldPeerIp, arr);
-        int old_peer_port = port;
-
+        jobject oldPeer = make_kiche_address(env, ip_buf, ip_len, port);
         extract_sockaddr(&local_ss, ip_buf, &ip_len, &port);
-        arr = (*env)->NewByteArray(env, ip_len);
-        (*env)->SetByteArrayRegion(env, arr, 0, ip_len, (const jbyte *)ip_buf);
-        (*env)->SetObjectField(env, self, fLocalIp, arr);
-        int local_port = port;
-
+        jobject local = make_kiche_address(env, ip_buf, ip_len, port);
         extract_sockaddr(&peer_ss, ip_buf, &ip_len, &port);
-        arr = (*env)->NewByteArray(env, ip_len);
-        (*env)->SetByteArrayRegion(env, arr, 0, ip_len, (const jbyte *)ip_buf);
-        (*env)->SetObjectField(env, self, fPeerIp, arr);
-        int peer_port = port;
+        jobject peer = make_kiche_address(env, ip_buf, ip_len, port);
 
-        jlongArray result = (*env)->NewLongArray(env, 7);
-        jlong vals[7] = {type, (jlong)id, old_local_port, old_peer_port, local_port, peer_port, 0};
-        (*env)->SetLongArrayRegion(env, result, 0, 7, vals);
-        return result;
+        result = (*env)->NewObject(env, clsReused, ctorReused,
+            (jlong)id, oldLocal, oldPeer, local, peer);
+        (*env)->DeleteLocalRef(env, oldLocal);
+        (*env)->DeleteLocalRef(env, oldPeer);
+        (*env)->DeleteLocalRef(env, local);
+        (*env)->DeleteLocalRef(env, peer);
     } else {
         struct sockaddr_storage local_ss, peer_ss;
         socklen_t local_len, peer_len;
+        jclass eventCls;
 
         switch (type) {
             case QUICHE_PATH_EVENT_NEW:
-                quiche_path_event_new(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
+                quiche_path_event_new(ev, &local_ss, &local_len, &peer_ss, &peer_len);
+                eventCls = clsNew; break;
             case QUICHE_PATH_EVENT_VALIDATED:
-                quiche_path_event_validated(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
+                quiche_path_event_validated(ev, &local_ss, &local_len, &peer_ss, &peer_len);
+                eventCls = clsValidated; break;
             case QUICHE_PATH_EVENT_FAILED_VALIDATION:
-                quiche_path_event_failed_validation(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
+                quiche_path_event_failed_validation(ev, &local_ss, &local_len, &peer_ss, &peer_len);
+                eventCls = clsFailedValidation; break;
             case QUICHE_PATH_EVENT_CLOSED:
-                quiche_path_event_closed(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
+                quiche_path_event_closed(ev, &local_ss, &local_len, &peer_ss, &peer_len);
+                eventCls = clsClosed; break;
             case QUICHE_PATH_EVENT_PEER_MIGRATED:
-                quiche_path_event_peer_migrated(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
+                quiche_path_event_peer_migrated(ev, &local_ss, &local_len, &peer_ss, &peer_len);
+                eventCls = clsPeerMigrated; break;
             default:
                 quiche_path_event_free(ev);
                 return NULL;
         }
         quiche_path_event_free(ev);
 
-        uint8_t ip_buf[16]; int ip_len, port;
-
         extract_sockaddr(&local_ss, ip_buf, &ip_len, &port);
-        jbyteArray arr = (*env)->NewByteArray(env, ip_len);
-        (*env)->SetByteArrayRegion(env, arr, 0, ip_len, (const jbyte *)ip_buf);
-        (*env)->SetObjectField(env, self, fLocalIp, arr);
-        int local_port = port;
-
+        jobject local = make_kiche_address(env, ip_buf, ip_len, port);
         extract_sockaddr(&peer_ss, ip_buf, &ip_len, &port);
-        arr = (*env)->NewByteArray(env, ip_len);
-        (*env)->SetByteArrayRegion(env, arr, 0, ip_len, (const jbyte *)ip_buf);
-        (*env)->SetObjectField(env, self, fPeerIp, arr);
-        int peer_port = port;
+        jobject peer = make_kiche_address(env, ip_buf, ip_len, port);
 
-        jlongArray result = (*env)->NewLongArray(env, 3);
-        jlong vals[3] = {type, local_port, peer_port};
-        (*env)->SetLongArrayRegion(env, result, 0, 3, vals);
-        return result;
+        result = (*env)->NewObject(env, eventCls, ctorSimple, local, peer);
+        (*env)->DeleteLocalRef(env, local);
+        (*env)->DeleteLocalRef(env, peer);
     }
+    return result;
 }
 
-JNIEXPORT jlongArray JNICALL
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativeSendOnPath)(JNIEnv *env, jobject self, jlong handle,
         jbyteArray buf, jint len,
         jbyteArray fromIp, jint fromPort, jboolean hasFrom,
@@ -905,42 +842,9 @@ JNI_FN(PKG, KicheConnection, nativeSendOnPath)(JNIEnv *env, jobject self, jlong 
     (*env)->ReleaseByteArrayElements(env, buf, b, 0);
 
     if (written == QUICHE_ERR_DONE) return NULL;
-    if (written < 0) return NULL;
+    if (written < 0) { throw_kiche_exception(env, (int)written); return NULL; }
 
-    uint8_t snd_from_ip[16], snd_to_ip[16];
-    int snd_from_ip_len, snd_to_ip_len, snd_from_port, snd_to_port;
-    extract_sockaddr(&si.from, snd_from_ip, &snd_from_ip_len, &snd_from_port);
-    extract_sockaddr(&si.to, snd_to_ip, &snd_to_ip_len, &snd_to_port);
-
-    long at_nanos = (long)si.at.tv_sec * 1000000000L + (long)si.at.tv_nsec;
-
-    jlongArray result = (*env)->NewLongArray(env, 2);
-    jlong vals[2] = { written, at_nanos };
-    (*env)->SetLongArrayRegion(env, result, 0, 2, vals);
-
-    // Reuse existing sendFromIp/sendToIp/sendFromPort/sendToPort fields
-    static jclass connCls2 = NULL;
-    static jfieldID fFromIp2 = NULL, fFromPort2 = NULL, fToIp2 = NULL, fToPort2 = NULL;
-    if (!connCls2) {
-        connCls2 = (*env)->FindClass(env, "eu/buney/kiche/KicheConnection");
-        connCls2 = (jclass)(*env)->NewGlobalRef(env, (jobject)connCls2);
-        fFromIp2 = (*env)->GetFieldID(env, connCls2, "sendFromIp", "[B");
-        fFromPort2 = (*env)->GetFieldID(env, connCls2, "sendFromPort", "I");
-        fToIp2 = (*env)->GetFieldID(env, connCls2, "sendToIp", "[B");
-        fToPort2 = (*env)->GetFieldID(env, connCls2, "sendToPort", "I");
-    }
-
-    jbyteArray fromIpArr = (*env)->NewByteArray(env, snd_from_ip_len);
-    (*env)->SetByteArrayRegion(env, fromIpArr, 0, snd_from_ip_len, (const jbyte *)snd_from_ip);
-    (*env)->SetObjectField(env, self, fFromIp2, fromIpArr);
-    (*env)->SetIntField(env, self, fFromPort2, snd_from_port);
-
-    jbyteArray toIpArr = (*env)->NewByteArray(env, snd_to_ip_len);
-    (*env)->SetByteArrayRegion(env, toIpArr, 0, snd_to_ip_len, (const jbyte *)snd_to_ip);
-    (*env)->SetObjectField(env, self, fToIp2, toIpArr);
-    (*env)->SetIntField(env, self, fToPort2, snd_to_port);
-
-    return result;
+    return make_send_result(env, (int)written, &si);
 }
 
 JNIEXPORT jlong JNICALL

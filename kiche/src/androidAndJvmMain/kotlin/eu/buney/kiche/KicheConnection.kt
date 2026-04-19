@@ -1,12 +1,6 @@
 package eu.buney.kiche
 
 actual class KicheConnection private constructor(private var handle: Long) : AutoCloseable {
-    // Fields written by JNI for send() output
-    @JvmField internal var sendFromIp: ByteArray? = null
-    @JvmField internal var sendFromPort: Int = 0
-    @JvmField internal var sendToIp: ByteArray? = null
-    @JvmField internal var sendToPort: Int = 0
-
     // Fields written by JNI for streamRecv() and error outputs
     @JvmField internal var lastStreamRecvFin: Boolean = false
     @JvmField internal var lastErrorReason: ByteArray? = null
@@ -14,12 +8,6 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     // Fields written by JNI for pathStats() address data
     @JvmField internal var lastPathStatsLocalIp: ByteArray? = null
     @JvmField internal var lastPathStatsPeerIp: ByteArray? = null
-
-    // Fields written by JNI for pathEventNext() address data
-    @JvmField internal var pathEventLocalIp: ByteArray? = null
-    @JvmField internal var pathEventPeerIp: ByteArray? = null
-    @JvmField internal var pathEventOldLocalIp: ByteArray? = null
-    @JvmField internal var pathEventOldPeerIp: ByteArray? = null
 
     init {
         KicheLoader.load()
@@ -89,17 +77,8 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
         return rc
     }
 
-    actual fun send(buf: ByteArray, len: Int): KicheSendResult? {
-        val result = nativeSend(requireOpen(), buf, len) ?: return null
-        val written = result[0].toInt()
-        val atNanos = result[1]
-        return KicheSendResult(
-            written = written,
-            from = KicheAddress(sendFromIp!!, sendFromPort),
-            to = KicheAddress(sendToIp!!, sendToPort),
-            atNanos = atNanos,
-        )
-    }
+    actual fun send(buf: ByteArray, len: Int): KicheSendResult? =
+        nativeSend(requireOpen(), buf, len)
 
     actual fun sendAckEliciting(): Long = nativeSendAckEliciting(requireOpen())
 
@@ -237,43 +216,13 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
         return rc
     }
 
-    actual fun pathEventNext(): KichePathEvent? {
-        val data = nativePathEventNext(requireOpen()) ?: return null
-        val type = data[0].toInt()
-        return when (type) {
-            4 -> KichePathEvent.ReusedSourceConnectionId(
-                id = data[1],
-                oldLocal = KicheAddress(pathEventOldLocalIp!!, data[2].toInt()),
-                oldPeer = KicheAddress(pathEventOldPeerIp!!, data[3].toInt()),
-                local = KicheAddress(pathEventLocalIp!!, data[4].toInt()),
-                peer = KicheAddress(pathEventPeerIp!!, data[5].toInt()),
-            )
-            else -> {
-                val local = KicheAddress(pathEventLocalIp!!, data[1].toInt())
-                val peer = KicheAddress(pathEventPeerIp!!, data[2].toInt())
-                when (type) {
-                    0 -> KichePathEvent.New(local, peer)
-                    1 -> KichePathEvent.Validated(local, peer)
-                    2 -> KichePathEvent.FailedValidation(local, peer)
-                    3 -> KichePathEvent.Closed(local, peer)
-                    5 -> KichePathEvent.PeerMigrated(local, peer)
-                    else -> error("Unknown path event type: $type")
-                }
-            }
-        }
-    }
+    actual fun pathEventNext(): KichePathEvent? =
+        nativePathEventNext(requireOpen())
 
-    actual fun sendOnPath(buf: ByteArray, len: Int, from: KicheAddress?, to: KicheAddress?): KicheSendResult? {
-        val result = nativeSendOnPath(requireOpen(), buf, len,
+    actual fun sendOnPath(buf: ByteArray, len: Int, from: KicheAddress?, to: KicheAddress?): KicheSendResult? =
+        nativeSendOnPath(requireOpen(), buf, len,
             from?.ip, from?.port ?: 0, from != null,
-            to?.ip, to?.port ?: 0, to != null) ?: return null
-        return KicheSendResult(
-            written = result[0].toInt(),
-            from = KicheAddress(sendFromIp!!, sendFromPort),
-            to = KicheAddress(sendToIp!!, sendToPort),
-            atNanos = result[1],
-        )
-    }
+            to?.ip, to?.port ?: 0, to != null)
 
     actual fun sendQuantumOnPath(local: KicheAddress, peer: KicheAddress): Long =
         nativeSendQuantumOnPath(requireOpen(), local.ip, local.port, peer.ip, peer.port)
@@ -378,7 +327,7 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativeFree(handle: Long)
     private external fun nativeRecv(handle: Long, buf: ByteArray, len: Int,
         fromIp: ByteArray, fromPort: Int, toIp: ByteArray, toPort: Int): Int
-    private external fun nativeSend(handle: Long, buf: ByteArray, len: Int): LongArray?
+    private external fun nativeSend(handle: Long, buf: ByteArray, len: Int): KicheSendResult?
     private external fun nativeStreamRecv(handle: Long, streamId: Long, buf: ByteArray, len: Int): Long
     private external fun nativeStreamSend(handle: Long, streamId: Long, buf: ByteArray, len: Int, fin: Boolean): Long
     private external fun nativeStreamShutdown(handle: Long, streamId: Long, direction: Int, err: Long): Int
@@ -442,10 +391,10 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativeIsPathValidated(handle: Long, localIp: ByteArray, localPort: Int, peerIp: ByteArray, peerPort: Int): Int
     private external fun nativeMigrateSource(handle: Long, localIp: ByteArray, localPort: Int): Long
     private external fun nativeMigrate(handle: Long, localIp: ByteArray, localPort: Int, peerIp: ByteArray, peerPort: Int): Long
-    private external fun nativePathEventNext(handle: Long): LongArray?
+    private external fun nativePathEventNext(handle: Long): KichePathEvent?
     private external fun nativeSendOnPath(handle: Long, buf: ByteArray, len: Int,
         fromIp: ByteArray?, fromPort: Int, hasFrom: Boolean,
-        toIp: ByteArray?, toPort: Int, hasTo: Boolean): LongArray?
+        toIp: ByteArray?, toPort: Int, hasTo: Boolean): KicheSendResult?
     private external fun nativeSendQuantumOnPath(handle: Long, localIp: ByteArray, localPort: Int, peerIp: ByteArray, peerPort: Int): Long
     private external fun nativeSendAckElicitingOnPath(handle: Long, localIp: ByteArray, localPort: Int, peerIp: ByteArray, peerPort: Int): Int
     private external fun nativePathsIter(handle: Long, fromIp: ByteArray, fromPort: Int): Array<KicheAddress>?
