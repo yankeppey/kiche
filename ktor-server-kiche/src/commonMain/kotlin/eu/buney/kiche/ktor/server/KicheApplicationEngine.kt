@@ -279,6 +279,30 @@ public class KicheApplicationEngine(
                             return@withLock
                         }
 
+                        // Address validation via stateless retry tokens
+                        if (headerInfo.token.isEmpty()) {
+                            slog("serveLoop: no token, sending retry to ${peerAddr.port}")
+                            val token = mintToken(headerInfo.dcid, from)
+                            val newScid = Random.nextBytes(DCID_LEN)
+                            val written = Kiche.retry(
+                                scid = headerInfo.scid,
+                                dcid = headerInfo.dcid,
+                                newScid = newScid,
+                                token = token,
+                                version = headerInfo.version,
+                                out = sendBuf,
+                            )
+                            val packet = Buffer().apply { write(sendBuf, 0, written) }
+                            udpSocket.send(Datagram(packet, peerAddr))
+                            return@withLock
+                        }
+
+                        val odcid = validateToken(headerInfo.token, from)
+                        if (odcid == null) {
+                            slog("serveLoop: invalid token from ${peerAddr.port}, dropping")
+                            return@withLock
+                        }
+
                         // For now, still single-connection: destroy existing if any
                         if (connections.isNotEmpty()) {
                             for (old in connections.values) old.cleanup()
@@ -289,9 +313,13 @@ public class KicheApplicationEngine(
                         val connScope = CoroutineScope(
                             scope.coroutineContext + SupervisorJob(scope.coroutineContext.job)
                         )
-                        val scid = Random.nextBytes(DCID_LEN)
+                        // Use headerInfo.dcid as SCID — this is the newScid from the
+                        // Retry packet, which the client used as its DCID in the retried
+                        // Initial. The server must accept with this CID for the client's
+                        // transport parameters to validate correctly.
+                        val scid = headerInfo.dcid
                         val conn = KicheConnection.accept(
-                            scid = scid, odcid = null,
+                            scid = scid, odcid = odcid,
                             local = localAddr, peer = from, config = quicConfig,
                         )
                         cs = ConnectionState(
@@ -761,9 +789,51 @@ public class KicheApplicationEngine(
 
     //endregion
 
-    private companion object {
+    internal companion object {
         const val DCID_LEN = 16
         val H3_ALPN: ByteArray = byteArrayOf(2, 'h'.code.toByte(), '3'.code.toByte())
+
+        private val TOKEN_PREFIX = "quiche".encodeToByteArray() // 6 bytes
+
+        /**
+         * Mints a stateless retry token: `"quiche" + ip + port(2B BE) + dcid`.
+         * Same scheme as quiche's C example http3-server.c.
+         */
+        internal fun mintToken(dcid: ByteArray, peerAddr: KicheAddress): ByteArray {
+            val portBytes = byteArrayOf(
+                (peerAddr.port shr 8).toByte(),
+                (peerAddr.port and 0xFF).toByte(),
+            )
+            return TOKEN_PREFIX + peerAddr.ip + portBytes + dcid
+        }
+
+        /**
+         * Validates a retry token and extracts the original DCID.
+         * Returns the original DCID, or null if the token is invalid.
+         */
+        internal fun validateToken(token: ByteArray, peerAddr: KicheAddress): ByteArray? {
+            if (token.size < TOKEN_PREFIX.size) return null
+            // Check prefix
+            for (i in TOKEN_PREFIX.indices) {
+                if (token[i] != TOKEN_PREFIX[i]) return null
+            }
+            var offset = TOKEN_PREFIX.size
+            // Check peer IP
+            val ipLen = peerAddr.ip.size
+            if (token.size < offset + ipLen) return null
+            for (i in 0 until ipLen) {
+                if (token[offset + i] != peerAddr.ip[i]) return null
+            }
+            offset += ipLen
+            // Check peer port (2 bytes big-endian)
+            if (token.size < offset + 2) return null
+            val tokenPort = ((token[offset].toInt() and 0xFF) shl 8) or (token[offset + 1].toInt() and 0xFF)
+            if (tokenPort != peerAddr.port) return null
+            offset += 2
+            // Remainder is the original DCID
+            if (offset >= token.size) return null
+            return token.copyOfRange(offset, token.size)
+        }
 
         suspend fun drainSend(conn: KicheConnection, buf: ByteArray, socket: BoundDatagramSocket, peerAddr: InetSocketAddress) {
             while (true) {
