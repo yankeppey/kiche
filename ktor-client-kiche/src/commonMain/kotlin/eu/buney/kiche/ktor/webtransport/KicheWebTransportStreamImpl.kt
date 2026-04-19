@@ -29,15 +29,19 @@ internal class KicheWebTransportStreamImpl(
     override val coroutineContext: CoroutineContext =
         parentScope.coroutineContext + job + CoroutineName("wt-stream-$id")
 
-    // Public read/write channels exposed to the user
-    private val _incoming = ByteChannel()
+    // Public read/write channels exposed to the user.
+    private val _incoming = ByteChannel(autoFlush = true)
     override val incoming: ByteReadChannel get() = _incoming
 
     private val _outgoing = ByteChannel()
     override val outgoing: ByteWriteChannel get() = _outgoing
 
-    // Internal channels bridged by coroutines — drainable without suspending
-    internal val incomingData = Channel<ByteArray>(Channel.UNLIMITED)
+    // Incoming data queue — event loop enqueues, bridge coroutine writes to _incoming.
+    // Using Channel ensures ordering: data is written to _incoming in the order it was
+    // received, and close() only takes effect after all data is drained.
+    private val incomingData = Channel<ByteArray>(Channel.UNLIMITED)
+
+    // Outgoing data queue — bridge coroutine reads from _outgoing, event loop sends via H3
     internal val outgoingData = Channel<ByteArray>(Channel.UNLIMITED)
 
     /** Set to true when the user calls [finish] or closes [outgoing]. */
@@ -53,12 +57,15 @@ internal class KicheWebTransportStreamImpl(
     internal var pendingWriteOffset: Int = 0
 
     init {
-        // Bridge incomingData channel → ByteReadChannel
-        launch {
+        // Bridge incomingData channel → ByteReadChannel.
+        // Uses Dispatchers.Unconfined so the coroutine resumes immediately in the
+        // caller's thread when data is available — this prevents the race where
+        // onFinished() closes the channel before a Default-dispatched coroutine
+        // has had CPU time to drain and write the data.
+        launch(Dispatchers.Unconfined) {
             try {
                 for (chunk in incomingData) {
                     _incoming.writeFully(chunk)
-                    _incoming.flush()
                 }
             } catch (_: Throwable) { }
             _incoming.close()

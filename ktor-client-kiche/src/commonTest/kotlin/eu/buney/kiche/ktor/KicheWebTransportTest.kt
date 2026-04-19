@@ -131,9 +131,13 @@ class KicheWebTransportTest {
             val message = "hello webtransport"
             stream.outgoing.writeStringUtf8(message)
             stream.outgoing.flush()
+            // Read the echo before sending FIN. The server echo handler streams
+            // data back as it arrives (inside its read loop), so we can read a
+            // known-length response without the server needing our FIN first.
+            // Sending FIN before reading races with H3 event processing and can
+            // cause a premature Finished event on the client.
+            val response = stream.incoming.readExact(message.length)
             stream.finish()
-
-            val response = readAll(stream.incoming)
             assertEquals(message, response.decodeToString())
         }
     }
@@ -146,12 +150,12 @@ class KicheWebTransportTest {
                 val msg = "stream-$i"
                 stream.outgoing.writeStringUtf8(msg)
                 stream.outgoing.flush()
-                stream.finish()
                 msg to stream
             }
 
             for ((expected, stream) in streams) {
-                val response = readAll(stream.incoming)
+                val response = stream.incoming.readExact(expected.length)
+                stream.finish()
                 assertEquals(expected, response.decodeToString())
             }
         }
@@ -301,20 +305,21 @@ class KicheWebTransportTest {
         client.webTransport("$testUrl/wt") {
             // Send on a bidi stream and datagrams simultaneously
             val stream = createBidirectionalStream()
-            stream.outgoing.writeStringUtf8("stream-data")
+            val streamMsg = "stream-data"
+            stream.outgoing.writeStringUtf8(streamMsg)
             stream.outgoing.flush()
-            stream.finish()
 
             val dgramPayload = "dgram-data".encodeToByteArray()
             datagrams.outgoing.send(dgramPayload)
 
             // Verify both come back
-            val streamResponse = async { readAll(stream.incoming) }
+            val streamResponse = async { stream.incoming.readExact(streamMsg.length) }
             val dgramResponse = async {
                 withTimeout(5000) { datagrams.incoming.receive() }
             }
 
-            assertEquals("stream-data", streamResponse.await().decodeToString())
+            assertEquals(streamMsg, streamResponse.await().decodeToString())
+            stream.finish()
             assertContentEquals(dgramPayload, dgramResponse.await())
         }
     }
@@ -333,6 +338,18 @@ class KicheWebTransportTest {
     }
 
     //endregion
+}
+
+/** Reads exactly [count] bytes from a [ByteReadChannel]. */
+private suspend fun ByteReadChannel.readExact(count: Int): ByteArray {
+    val buf = ByteArray(count)
+    var offset = 0
+    while (offset < count) {
+        val n = readAvailable(buf, offset, count - offset)
+        if (n < 0) break
+        offset += n
+    }
+    return buf.copyOf(offset)
 }
 
 /** Reads all remaining bytes from a [ByteReadChannel]. */

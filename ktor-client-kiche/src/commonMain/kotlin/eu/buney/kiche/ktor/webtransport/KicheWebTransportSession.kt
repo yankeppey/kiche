@@ -304,6 +304,8 @@ internal class KicheWebTransportSession(
                         _closed.complete(parseCloseInfo())
                     }
                 } else {
+                    // Drain any remaining body data before closing the stream.
+                    readStreamDataLocked(event.streamId, recvBuf)
                     val stream = activeStreams[event.streamId]
                     stream?.onFinished()
                 }
@@ -335,7 +337,6 @@ internal class KicheWebTransportSession(
 
     private fun readStreamDataLocked(streamId: Long, buf: ByteArray) {
         val stream = activeStreams[streamId] ?: return
-        // H3 events deliver data via Data events — read body from H3 layer
         while (true) {
             val n = try {
                 h3Conn.recvBody(conn, streamId, buf)
