@@ -70,6 +70,9 @@ public class KicheApplicationEngine(
 
         /** Maximum concurrent unidirectional streams. */
         public var initialMaxStreamsUni: Long = 100L
+
+        /** Maximum number of concurrent QUIC connections. New connections are rejected when full. */
+        public var maxConnections: Int = 1000
     }
 
     private val serverJob = CompletableDeferred<Unit>()
@@ -237,7 +240,8 @@ public class KicheApplicationEngine(
                                 driveWtSessionsLocked(h3, cs, udpSocket, sendBuf)
                                 drainSend(cs.conn, sendBuf, udpSocket, cs.peerAddr)
                             }
-                            if (cs.conn.isClosed) {
+                            if (cs.conn.isClosed || cs.conn.isTimedOut) {
+                                slog("timeout cleanup: removing connection dcid=${cs.dcid.toHexString()} closed=${cs.conn.isClosed} timedOut=${cs.conn.isTimedOut}")
                                 cs.cleanup()
                                 iter.remove()
                             }
@@ -303,7 +307,13 @@ public class KicheApplicationEngine(
                             return@withLock
                         }
 
-                        slog("serveLoop: accepting new connection from ${peerAddr.port} (active=${connections.size})")
+                        // Reject if at connection limit
+                        if (connections.size >= configuration.maxConnections) {
+                            slog("serveLoop: connection limit reached (${connections.size}), dropping from ${peerAddr.port}")
+                            return@withLock
+                        }
+
+                        slog("serveLoop: accepting connection from ${peerAddr.port} (active=${connections.size})")
                         val connScope = CoroutineScope(
                             scope.coroutineContext + SupervisorJob(scope.coroutineContext.job)
                         )
@@ -349,9 +359,10 @@ public class KicheApplicationEngine(
                     sendSignal.trySend(Unit)
 
                     // Connection closed → cleanup
-                    if (cs.conn.isClosed) {
+                    if (cs.conn.isClosed || cs.conn.isTimedOut) {
+                        slog("recv cleanup: removing connection dcid=${cs.dcid.toHexString()} closed=${cs.conn.isClosed} timedOut=${cs.conn.isTimedOut}")
                         cs.cleanup()
-                        connections.remove(connId)
+                        connections.remove(ConnectionId(cs.dcid))
                     }
                 }
             }
