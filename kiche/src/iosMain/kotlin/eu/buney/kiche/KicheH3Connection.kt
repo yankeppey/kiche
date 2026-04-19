@@ -65,7 +65,7 @@ actual class KicheH3Connection actual constructor(
         val rc = quiche_h3_send_request(h3(), quicConn.ptr!!.reinterpret(),
             hdrs, headers.size.toULong(), fin)
         pins.forEach { (n, v) -> n.unpin(); v.unpin() }
-        if (rc < 0) KicheException.check(rc.toInt())
+        if (rc < 0) KicheH3Exception.check(rc.toInt())
         rc
     }
 
@@ -75,13 +75,19 @@ actual class KicheH3Connection actual constructor(
             // Kotlin/Native can't take addressOf(0) on an empty array, so pass null.
             val rc = quiche_h3_send_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), null, 0u, fin)
-            if (rc < 0) KicheException.check(rc.toInt())
+            if (rc < 0) {
+                KicheH3Exception.check(rc.toInt())
+                return 0 // check() didn't throw (Done) → no bytes sent
+            }
             return rc.toInt()
         }
         body.usePinned { pinned ->
             val rc = quiche_h3_send_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), pinned.addressOf(0).reinterpret(), body.size.toULong(), fin)
-            if (rc < 0) KicheException.check(rc.toInt())
+            if (rc < 0) {
+                KicheH3Exception.check(rc.toInt())
+                return 0 // check() didn't throw (Done) → no bytes sent
+            }
             return rc.toInt()
         }
     }
@@ -91,7 +97,7 @@ actual class KicheH3Connection actual constructor(
         buf.usePinned { pinned ->
             val rc = quiche_h3_recv_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), pinned.addressOf(0).reinterpret(), buf.size.toULong())
-            if (rc < 0) KicheException.check(rc.toInt())
+            if (rc < 0) KicheH3Exception.check(rc.toInt())
             return rc.toInt()
         }
     }
@@ -113,11 +119,11 @@ actual class KicheH3Connection actual constructor(
         val rc = quiche_h3_send_response(h3(), quicConn.ptr!!.reinterpret(),
             streamId.toULong(), hdrs, headers.size.toULong(), fin)
         pins.forEach { (n, v) -> n.unpin(); v.unpin() }
-        KicheException.check(rc)
+        KicheH3Exception.check(rc)
     }
 
     actual fun sendGoaway(quicConn: KicheConnection, id: Long) {
-        KicheException.check(quiche_h3_send_goaway(h3(), quicConn.ptr!!.reinterpret(), id.toULong()))
+        KicheH3Exception.check(quiche_h3_send_goaway(h3(), quicConn.ptr!!.reinterpret(), id.toULong()))
     }
 
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =

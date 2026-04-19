@@ -34,6 +34,10 @@ enum class KicheH3Error(val code: Int) {
     ConnectError(-19),
     VersionFallback(-20);
 
+    /** True for errors that indicate temporary backpressure (retry after draining). */
+    val isRetryable: Boolean
+        get() = this == Done || this == StreamBlocked
+
     companion object {
         fun fromCode(code: Int): KicheH3Error? = entries.find { it.code == code }
     }

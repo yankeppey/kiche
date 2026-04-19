@@ -77,6 +77,17 @@ class KicheWebTransportTest {
                 // Immediately close the session
                 close(WebTransportCloseInfo(42u, "bye"))
             }
+
+            webTransport("/wt/server-push") {
+                // Server opens a bidi stream and writes data
+                val stream = createBidirectionalStream()
+                stream.outgoing.writeStringUtf8("pushed-from-server")
+                stream.outgoing.flush()
+                stream.finish()
+
+                // Keep alive until client closes
+                closed.await()
+            }
         }
         client = HttpClient(Kiche) {
             engine { verifyPeer = false }
@@ -200,7 +211,113 @@ class KicheWebTransportTest {
 
     //endregion
 
-    //region HTTP/3 alongside WebTransport
+    //region Session lifecycle — additional
+
+    @Test
+    fun `server-initiated close carries close info`() = runBlocking {
+        val session = client.webTransportSession("$testUrl/wt/immediate-close")
+        session.ready.await()
+
+        // Server immediately closes with code=42, reason="bye"
+        val closeInfo = withTimeout(5000) { session.closed.await() }
+        assertNotNull(closeInfo)
+        assertEquals(42u, closeInfo.code)
+        assertEquals("bye", closeInfo.reason)
+    }
+
+    @Test
+    fun `session rejects invalid path`() = runBlocking {
+        var reachedHandler = false
+        try {
+            client.webTransport("$testUrl/nonexistent-wt-path") {
+                reachedHandler = true
+            }
+        } catch (_: Throwable) {
+            // Expected — server should reject the CONNECT request
+        }
+        assertFalse(reachedHandler, "Should not reach session handler for invalid path")
+    }
+
+    //endregion
+
+    //region Server-initiated streams
+
+    // TODO: Server-initiated H3 request streams are not supported by quiche's H3 API.
+    //  Requires a different mechanism (e.g., capsule protocol on the CONNECT stream body).
+    @Ignore
+    @Test
+    fun `server-initiated bidirectional stream`() = runBlocking {
+        client.webTransport("$testUrl/wt/server-push") {
+            val stream = withTimeout(5000) {
+                incomingBidirectionalStreams.receive()
+            }
+            val data = readAll(stream.incoming)
+            assertEquals("pushed-from-server", data.decodeToString())
+        }
+    }
+
+    //endregion
+
+    //region Unidirectional streams
+
+    // TODO: Server-initiated streams require a different mechanism than H3 request streams.
+    //  The server echo uses createUnidirectionalStream() which can't create H3 streams.
+    @Ignore
+    @Test
+    fun `unidirectional stream echo`() = runBlocking {
+        client.webTransport("$testUrl/wt") {
+            // Client sends a uni stream, server echoes back as a new server→client uni stream
+            val outStream = createUnidirectionalStream()
+            outStream.outgoing.writeStringUtf8("uni-hello")
+            outStream.outgoing.flush()
+            outStream.finish()
+
+            val inStream = withTimeout(5000) {
+                incomingUnidirectionalStreams.receive()
+            }
+            val response = readAll(inStream.incoming)
+            assertEquals("uni-hello", response.decodeToString())
+        }
+    }
+
+    //endregion
+
+    //region Datagrams — additional
+
+    @Test
+    fun `max datagram size is positive`() = runBlocking {
+        client.webTransport("$testUrl/wt") {
+            val maxSize = datagrams.maxDatagramSize
+            assertTrue(maxSize > 0, "maxDatagramSize should be positive, got $maxSize")
+        }
+    }
+
+    //endregion
+
+    //region Mixed traffic
+
+    @Test
+    fun `streams and datagrams concurrently`() = runBlocking {
+        client.webTransport("$testUrl/wt") {
+            // Send on a bidi stream and datagrams simultaneously
+            val stream = createBidirectionalStream()
+            stream.outgoing.writeStringUtf8("stream-data")
+            stream.outgoing.flush()
+            stream.finish()
+
+            val dgramPayload = "dgram-data".encodeToByteArray()
+            datagrams.outgoing.send(dgramPayload)
+
+            // Verify both come back
+            val streamResponse = async { readAll(stream.incoming) }
+            val dgramResponse = async {
+                withTimeout(5000) { datagrams.incoming.receive() }
+            }
+
+            assertEquals("stream-data", streamResponse.await().decodeToString())
+            assertContentEquals(dgramPayload, dgramResponse.await())
+        }
+    }
 
     @Test
     fun `HTTP request works alongside WebTransport routes`() = runBlocking {

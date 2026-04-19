@@ -108,9 +108,20 @@ internal class KicheWebTransportServerSession(
         slog("close: code=${info.code}")
         mutex.withLock {
             try {
-                conn.streamSend(sessionStreamId, ByteArray(0), 0, true)
+                // Send close info as H3 body on the CONNECT stream:
+                // 4 bytes big-endian code + UTF-8 reason
+                val reasonBytes = info.reason.encodeToByteArray()
+                val closeData = ByteArray(4 + reasonBytes.size)
+                closeData[0] = (info.code shr 24).toByte()
+                closeData[1] = (info.code shr 16).toByte()
+                closeData[2] = (info.code shr 8).toByte()
+                closeData[3] = info.code.toByte()
+                reasonBytes.copyInto(closeData, 4)
+                h3Conn.sendBody(conn, sessionStreamId, closeData, true)
                 drainSend()
-            } catch (_: KicheException) { }
+            } catch (_: Throwable) {
+                // Best effort — connection may already be closed
+            }
         }
         _closed.complete(info)
         cleanup()
@@ -169,7 +180,7 @@ internal class KicheWebTransportServerSession(
 
         // Flush outgoing stream writes
         for (state in activeStreams.values) {
-            state.driveWriteLocked(conn)
+            state.driveWriteLocked(conn, h3Conn)
         }
     }
 
@@ -237,6 +248,9 @@ internal class ServerStreamState(
     /** Set to true when the handler calls finish(). */
     @Volatile var finRequested: Boolean = false
 
+    /** Set to true when the bridging coroutine has drained all data from the ByteWriteChannel. */
+    @Volatile var bridgeDrained: Boolean = false
+
     /** Set to true once FIN has been sent on the QUIC stream. */
     @Volatile var finSent: Boolean = false
 
@@ -244,16 +258,16 @@ internal class ServerStreamState(
     var pendingWrite: ByteArray? = null
     var pendingWriteOffset: Int = 0
 
-    fun driveWriteLocked(conn: KicheConnection) {
+    fun driveWriteLocked(conn: KicheConnection, h3Conn: KicheH3Connection) {
         // Flush pending first
         while (pendingWrite != null) {
             val chunk = if (pendingWriteOffset == 0) pendingWrite!!
             else pendingWrite!!.copyOfRange(pendingWriteOffset, pendingWrite!!.size)
 
             val sent = try {
-                conn.streamSend(streamId, chunk, chunk.size, false)
-            } catch (e: KicheException) {
-                if (e.error.isRetryable) 0 else return
+                h3Conn.sendBody(conn, streamId, chunk, false)
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) 0 else return
             }
 
             if (sent > 0) {
@@ -270,9 +284,9 @@ internal class ServerStreamState(
             while (true) {
                 val data = outgoingData.tryReceive().getOrNull() ?: break
                 val sent = try {
-                    conn.streamSend(streamId, data, data.size, false)
-                } catch (e: KicheException) {
-                    if (e.error.isRetryable) {
+                    h3Conn.sendBody(conn, streamId, data, false)
+                } catch (e: KicheH3Exception) {
+                    if (e.isRetryable) {
                         pendingWrite = data
                         pendingWriteOffset = 0
                         break
@@ -287,13 +301,13 @@ internal class ServerStreamState(
             }
         }
 
-        // Send FIN if requested and all data flushed
+        // Send FIN if requested, all data flushed, and bridging coroutine is done
         @OptIn(ExperimentalCoroutinesApi::class)
-        if (finRequested && !finSent && pendingWrite == null && outgoingData.isEmpty) {
+        if (finRequested && !finSent && pendingWrite == null && outgoingData.isEmpty && bridgeDrained) {
             try {
-                conn.streamSend(streamId, ByteArray(0), 0, true)
+                h3Conn.sendBody(conn, streamId, ByteArray(0), true)
                 finSent = true
-            } catch (_: KicheException) { }
+            } catch (_: KicheH3Exception) { }
         }
     }
 
@@ -350,7 +364,8 @@ internal class ServerWebTransportStream(
                     }
                 }
             } catch (_: Throwable) { }
-            // If the outgoing channel closed, request FIN
+            // Bridging coroutine is done — all data from ByteWriteChannel has been queued
+            state.bridgeDrained = true
             if (!state.finRequested) {
                 state.finRequested = true
             }

@@ -1,23 +1,26 @@
 package eu.buney.kiche.ktor.webtransport
 
-import eu.buney.kiche.*
+import eu.buney.kiche.KicheConnection
+import eu.buney.kiche.KicheH3Connection
+import eu.buney.kiche.KicheH3Exception
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.channels.Channel
 import kotlin.coroutines.CoroutineContext
 
 /**
  * Implementation of a WebTransport stream backed by a QUIC stream.
  *
- * Exposes [ByteReadChannel] / [ByteWriteChannel] for reading and writing,
- * bridged from the poll-based quiche API via the session's event loop.
+ * Bridges Ktor's [ByteReadChannel]/[ByteWriteChannel] to quiche's poll-based API
+ * via intermediate [Channel]s that the session event loop can drain without suspending.
+ *
+ * Write path: user → [_outgoing] (ByteWriteChannel) → bridging coroutine → [outgoingData] (Channel) → event loop → quiche streamSend
+ * Read path:  quiche streamRecv → event loop → [incomingData] (Channel) → bridging coroutine → [_incoming] (ByteReadChannel) → user
  */
 internal class KicheWebTransportStreamImpl(
     override val id: Long,
     private val conn: KicheConnection,
     private val h3Conn: KicheH3Connection,
-    private val mutex: Mutex,
     parentScope: CoroutineScope,
     private val isBidi: Boolean,
 ) : WebTransportStream {
@@ -26,53 +29,84 @@ internal class KicheWebTransportStreamImpl(
     override val coroutineContext: CoroutineContext =
         parentScope.coroutineContext + job + CoroutineName("wt-stream-$id")
 
-    // Read side: data pushed by the session event loop
+    // Public read/write channels exposed to the user
     private val _incoming = ByteChannel()
     override val incoming: ByteReadChannel get() = _incoming
 
-    // Write side: user writes here, the session event loop drains it
     private val _outgoing = ByteChannel()
     override val outgoing: ByteWriteChannel get() = _outgoing
 
+    // Internal channels bridged by coroutines — drainable without suspending
+    internal val incomingData = Channel<ByteArray>(Channel.UNLIMITED)
+    internal val outgoingData = Channel<ByteArray>(Channel.UNLIMITED)
+
+    /** Set to true when the user calls [finish] or closes [outgoing]. */
+    @Volatile
+    internal var finRequested: Boolean = false
+
+    /** Set to true once FIN has been sent on the QUIC stream. */
+    @Volatile
+    internal var finSent: Boolean = false
+
     /** Pending write data not yet flushed to quiche. */
-    private var pendingWrite: ByteArray? = null
-    private var pendingWriteOffset: Int = 0
+    internal var pendingWrite: ByteArray? = null
+    internal var pendingWriteOffset: Int = 0
+
+    init {
+        // Bridge incomingData channel → ByteReadChannel
+        launch {
+            try {
+                for (chunk in incomingData) {
+                    _incoming.writeFully(chunk)
+                    _incoming.flush()
+                }
+            } catch (_: Throwable) { }
+            _incoming.close()
+        }
+
+        // Bridge ByteWriteChannel → outgoingData channel
+        launch {
+            val buf = ByteArray(65535)
+            try {
+                while (!_outgoing.isClosedForRead) {
+                    val n = _outgoing.readAvailable(buf)
+                    if (n > 0) {
+                        outgoingData.send(buf.copyOf(n))
+                    }
+                }
+            } catch (_: Throwable) { }
+            // Writer closed — request FIN
+            if (!finRequested) {
+                finRequested = true
+            }
+        }
+    }
 
     /**
      * Called by the session event loop when data is received on this stream.
      * Must be called under the session mutex.
      */
     fun onDataReceived(data: ByteArray) {
-        // ByteChannel.trySend or writeAvailable — use launch to avoid blocking the event loop
-        val result = _incoming.trySendData(data)
-        if (!result) {
-            // Channel is full or closed — launch a coroutine to write asynchronously
-            // This shouldn't happen often with UNLIMITED channel
-            @OptIn(DelicateCoroutinesApi::class)
-            GlobalScope.launch(Dispatchers.Default) {
-                try {
-                    _incoming.writeFully(data)
-                } catch (_: Throwable) {
-                    // Stream closed
-                }
-            }
-        }
+        incomingData.trySend(data)
     }
 
     /** Called when the stream receives a FIN (no more data from peer). */
     fun onFinished() {
-        _incoming.close()
+        incomingData.close()
     }
 
     /** Called when the stream is reset by the peer. */
     fun onReset() {
-        _incoming.close(WebTransportException("Stream $id reset by peer"))
-        _outgoing.close(WebTransportException("Stream $id reset by peer"))
+        val cause = WebTransportException("Stream $id reset by peer")
+        incomingData.close(cause)
+        _incoming.close(cause)
+        _outgoing.close(cause)
         job.cancel()
     }
 
     /** Closes both channels (used during session cleanup). */
     fun closeChannels() {
+        incomingData.close()
         _incoming.close()
         _outgoing.close()
         job.cancel()
@@ -80,80 +114,67 @@ internal class KicheWebTransportStreamImpl(
 
     override suspend fun finish() {
         _outgoing.close()
-        // The event loop will see the close and send FIN on the QUIC stream
+        finRequested = true
     }
 
     /**
      * Drives pending writes to the QUIC stream. Called by the session
      * event loop under the mutex.
      */
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun driveWriteLocked() {
-        if (_outgoing.isClosedForRead && pendingWrite == null) {
-            // Writer closed and all data flushed — send FIN
-            try {
-                conn.streamSend(id, ByteArray(0), 0, true)
-            } catch (_: KicheException) {
-                // Flow control or closed — will retry next loop
+        // Flush pending data first
+        while (pendingWrite != null) {
+            val chunk = if (pendingWriteOffset == 0) pendingWrite!!
+            else pendingWrite!!.copyOfRange(pendingWriteOffset, pendingWrite!!.size)
+
+            val sent = try {
+                h3Conn.sendBody(conn, id, chunk, false)
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) 0 else return
             }
-            return
+
+            if (sent > 0) {
+                pendingWriteOffset += sent
+                if (pendingWriteOffset >= pendingWrite!!.size) {
+                    pendingWrite = null
+                    pendingWriteOffset = 0
+                }
+            } else break
         }
 
-        // Try to drain data from the outgoing channel
-        while (true) {
-            // First flush any pending data
-            if (pendingWrite != null) {
-                val chunk = if (pendingWriteOffset == 0) pendingWrite!!
-                else pendingWrite!!.copyOfRange(pendingWriteOffset, pendingWrite!!.size)
-
+        // Dequeue new data from the bridging channel (non-blocking)
+        if (pendingWrite == null) {
+            while (true) {
+                val data = outgoingData.tryReceive().getOrNull() ?: break
                 val sent = try {
-                    conn.streamSend(id, chunk, chunk.size, false)
-                } catch (e: KicheException) {
-                    if (e.error.isRetryable) 0 else {
-                        _outgoing.close(e)
-                        return
-                    }
-                }
-
-                if (sent > 0) {
-                    pendingWriteOffset += sent
-                    if (pendingWriteOffset >= pendingWrite!!.size) {
-                        pendingWrite = null
+                    h3Conn.sendBody(conn, id, data, false)
+                } catch (e: KicheH3Exception) {
+                    if (e.isRetryable) {
+                        pendingWrite = data
                         pendingWriteOffset = 0
+                        break
                     }
-                } else {
-                    // Can't write more right now — flow control
                     return
                 }
-            }
-
-            // Read more from the outgoing channel (non-blocking)
-            val readBuf = ByteArray(65535)
-            val n = try {
-                if (_outgoing.availableForRead > 0) {
-                    // This is technically suspend but returns immediately when data is available
-                    // We can't call suspend here (we're under mutex), so use tryReceive pattern
-                    break // Can't read suspend under mutex — data will be picked up next iteration
-                } else {
+                if (sent < data.size) {
+                    pendingWrite = data
+                    pendingWriteOffset = sent
                     break
                 }
-            } catch (_: Throwable) {
-                break
             }
         }
-    }
-}
 
-/**
- * Try to send data to a ByteChannel without suspending.
- * Returns true if data was written, false if the channel is full or closed.
- */
-private fun ByteChannel.trySendData(data: ByteArray): Boolean {
-    return try {
-        if (isClosedForWrite) return false
-        // ByteChannel doesn't have a non-suspending write, so we return false
-        // to signal that a coroutine launch is needed
-        false
-    } catch (_: Throwable) {
-        false
+        // Send FIN if requested and all data flushed.
+        // Also verify _outgoing is closed for read — this means the bridging
+        // coroutine has finished reading all data and won't queue more.
+        if (finRequested && !finSent && pendingWrite == null && outgoingData.isEmpty
+            && _outgoing.isClosedForRead
+        ) {
+            try {
+                h3Conn.sendBody(conn, id, ByteArray(0), true)
+                finSent = true
+            } catch (_: KicheH3Exception) { }
+        }
     }
 }

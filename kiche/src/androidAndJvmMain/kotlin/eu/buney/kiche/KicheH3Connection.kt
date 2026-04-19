@@ -36,30 +36,33 @@ actual class KicheH3Connection actual constructor(
         val names = Array(headers.size) { headers[it].name }
         val values = Array(headers.size) { headers[it].value }
         val rc = nativeSendRequest(requireOpen(), quicConn.getHandle(), names, values, fin)
-        if (rc < 0) KicheException.check(rc.toInt())
+        if (rc < 0) KicheH3Exception.check(rc.toInt())
         return rc
     }
 
     actual fun sendBody(quicConn: KicheConnection, streamId: Long, body: ByteArray, fin: Boolean): Int {
         val rc = nativeSendBody(requireOpen(), quicConn.getHandle(), streamId, body, fin)
-        if (rc < 0) KicheException.check(rc.toInt())
+        if (rc < 0) {
+            KicheH3Exception.check(rc.toInt())
+            return 0 // check() didn't throw (Done) → no bytes sent
+        }
         return rc.toInt()
     }
 
     actual fun recvBody(quicConn: KicheConnection, streamId: Long, buf: ByteArray): Int {
         val rc = nativeRecvBody(requireOpen(), quicConn.getHandle(), streamId, buf)
-        if (rc < 0) KicheException.check(rc.toInt())
+        if (rc < 0) KicheH3Exception.check(rc.toInt())
         return rc.toInt()
     }
 
     actual fun sendResponse(quicConn: KicheConnection, streamId: Long, headers: List<KicheH3Header>, fin: Boolean) {
         val names = Array(headers.size) { headers[it].name }
         val values = Array(headers.size) { headers[it].value }
-        KicheException.check(nativeSendResponse(requireOpen(), quicConn.getHandle(), streamId, names, values, fin))
+        KicheH3Exception.check(nativeSendResponse(requireOpen(), quicConn.getHandle(), streamId, names, values, fin))
     }
 
     actual fun sendGoaway(quicConn: KicheConnection, id: Long) {
-        KicheException.check(nativeSendGoaway(requireOpen(), quicConn.getHandle(), id))
+        KicheH3Exception.check(nativeSendGoaway(requireOpen(), quicConn.getHandle(), id))
     }
 
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =

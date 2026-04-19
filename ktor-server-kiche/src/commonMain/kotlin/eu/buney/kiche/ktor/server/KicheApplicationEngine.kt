@@ -191,7 +191,7 @@ public class KicheApplicationEngine(
                         val h3 = h3Conn
                         if (h3 != null && connScope != null) {
                             pollAndDispatch(h3, c, udpSocket, connPeerSocketAddr!!, mutex, connScope!!)
-                            driveWtSessionsLocked(c, udpSocket, connPeerSocketAddr!!, sendBuf)
+                            driveWtSessionsLocked(h3, c, udpSocket, connPeerSocketAddr!!, sendBuf)
                             drainSend(c, sendBuf, udpSocket, connPeerSocketAddr!!)
                         }
                         if (requests.isNotEmpty()) {
@@ -256,7 +256,7 @@ public class KicheApplicationEngine(
                     val h3 = h3Conn
                     if (h3 != null) {
                         pollAndDispatch(h3, c, udpSocket, peerAddr, mutex, connScope!!)
-                        driveWtSessionsLocked(c, udpSocket, peerAddr, sendBuf)
+                        driveWtSessionsLocked(h3, c, udpSocket, peerAddr, sendBuf)
                     }
 
                     // Flush outgoing packets (flow control updates, ACKs) immediately.
@@ -306,6 +306,10 @@ public class KicheApplicationEngine(
     /** Active WebTransport sessions keyed by CONNECT stream ID. */
     private val wtSessions = mutableMapOf<Long, KicheWebTransportServerSession>()
 
+    /** Sub-streams waiting for a 200 response (sendResponse hit StreamBlocked). */
+    private data class PendingSubStream(val streamId: Long, val sessionId: Long, val isUni: Boolean)
+    private val pendingSubStreams = mutableListOf<PendingSubStream>()
+
     private fun pollAndDispatch(
         h3: KicheH3Connection,
         conn: KicheConnection,
@@ -348,6 +352,18 @@ public class KicheApplicationEngine(
                             h3, conn, event.streamId, state,
                             udpSocket, peerSocketAddr, mutex, connScope,
                         )
+                    } else if (state.method == "CONNECT" && state.protocol == "webtransport-stream") {
+                        // Sub-stream belonging to a WT session — route to the session
+                        requests.remove(event.streamId)
+                        val sessionIdStr = state.headers.find { it.first == "wt-session-id" }?.second
+                        val sessionId = sessionIdStr?.toLongOrNull()
+                        val session = if (sessionId != null) wtSessions[sessionId] else null
+                        if (session != null) {
+                            val isUni = state.headers.any { it.first == "wt-uni" && it.second == "true" }
+                            acceptSubStreamLocked(h3, conn, event.streamId, sessionId!!, session, isUni)
+                        } else {
+                            slog("Headers stream=${event.streamId} → WT sub-stream but no session found for $sessionId")
+                        }
                     }
                 }
 
@@ -360,9 +376,23 @@ public class KicheApplicationEngine(
                         while (true) {
                             val n = try {
                                 h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
-                            } catch (_: KicheException) { break }
+                            } catch (_: KicheH3Exception) { break }
                             if (n <= 0) break
                             wtSession.onDatagram(bodyBuf.copyOf(n))
+                        }
+                        continue
+                    }
+
+                    // Check if this is data on a WT sub-stream
+                    val wtSubSession = findWtSessionForStream(event.streamId)
+                    if (wtSubSession != null) {
+                        val bodyBuf = ByteArray(65535)
+                        while (true) {
+                            val n = try {
+                                h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
+                            } catch (_: KicheH3Exception) { break }
+                            if (n <= 0) break
+                            wtSubSession.onStreamData(event.streamId, bodyBuf.copyOf(n))
                         }
                         continue
                     }
@@ -373,7 +403,7 @@ public class KicheApplicationEngine(
                     while (true) {
                         val n = try {
                             h3.recvBody(quicConn = conn, streamId = event.streamId, buf = bodyBuf)
-                        } catch (_: KicheException) {
+                        } catch (_: KicheH3Exception) {
                             break
                         }
                         if (n <= 0) break
@@ -427,69 +457,28 @@ public class KicheApplicationEngine(
      * Called under mutex.
      */
     private fun driveWtSessionsLocked(
+        h3: KicheH3Connection,
         conn: KicheConnection,
         udpSocket: BoundDatagramSocket,
         peerAddr: InetSocketAddress,
         sendBuf: ByteArray,
     ) {
+        // Retry any sub-stream responses that were blocked
+        if (pendingSubStreams.isNotEmpty()) {
+            retryPendingSubStreamsLocked(h3, conn)
+        }
+
         for (session in wtSessions.values) {
             // Drive outgoing datagrams and stream writes
             session.driveOutgoingLocked()
 
-            // Read data from readable QUIC streams belonging to this session
-            val readBuf = ByteArray(65535)
-            for (state in session.activeStreams.values.toList()) {
-                while (conn.streamReadable(state.streamId)) {
-                    val result = try {
-                        conn.streamRecv(state.streamId, readBuf, readBuf.size)
-                    } catch (_: KicheException) { break }
-                    if (result.read > 0) {
-                        session.onStreamData(state.streamId, readBuf.copyOf(result.read))
-                    }
-                    if (result.fin) {
-                        session.onStreamFinished(state.streamId)
-                        break
-                    }
-                }
-            }
+            // NOTE: Do NOT read from QUIC streams here. Client sub-streams are
+            // H3 request streams — their data arrives via H3 Data events in
+            // pollAndDispatch(). Using conn.streamReadableNext()/streamRecv()
+            // would steal bytes from H3 internal streams (control, QPACK) and
+            // corrupt the H3 connection state.
 
-            // Check for new client-initiated streams (not yet in activeStreams)
-            while (true) {
-                val streamId = conn.streamReadableNext()
-                if (streamId < 0) break
-
-                // Skip streams already tracked by HTTP or other sessions
-                if (requests.containsKey(streamId)) continue
-                if (session.activeStreams.containsKey(streamId)) {
-                    // Already tracked — read data
-                    while (conn.streamReadable(streamId)) {
-                        val result = try {
-                            conn.streamRecv(streamId, readBuf, readBuf.size)
-                        } catch (_: KicheException) { break }
-                        if (result.read > 0) {
-                            session.onStreamData(streamId, readBuf.copyOf(result.read))
-                        }
-                        if (result.fin) {
-                            session.onStreamFinished(streamId)
-                            break
-                        }
-                    }
-                    continue
-                }
-
-                // New stream — read initial data and let session handle it
-                val result = try {
-                    conn.streamRecv(streamId, readBuf, readBuf.size)
-                } catch (_: KicheException) { break }
-                if (result.read > 0) {
-                    session.onStreamData(streamId, readBuf.copyOf(result.read))
-                }
-                if (result.fin) {
-                    session.onStreamFinished(streamId)
-                }
-            }
-
-            // Drain incoming QUIC datagrams
+            // Drain incoming QUIC datagrams (not H3-managed)
             val dgramBuf = ByteArray(conn.dgramMaxWritableLen().toInt().coerceAtLeast(1))
             while (conn.dgramRecvQueueLen() > 0) {
                 val n = try {
@@ -499,6 +488,49 @@ public class KicheApplicationEngine(
                     session.onDatagram(dgramBuf.copyOf(n))
                 }
             }
+        }
+    }
+
+    /**
+     * Accepts a WT sub-stream by sending a 200 response. If the H3 layer is
+     * temporarily blocked (StreamBlocked), defers to [pendingSubStreams] for
+     * retry on the next event loop iteration. Called under mutex.
+     */
+    private fun acceptSubStreamLocked(
+        h3: KicheH3Connection, conn: KicheConnection,
+        streamId: Long, sessionId: Long,
+        session: KicheWebTransportServerSession, isUni: Boolean,
+    ) {
+        try {
+            h3.sendResponse(conn, streamId, listOf(KicheH3Header(":status", "200")), fin = false)
+        } catch (e: KicheH3Exception) {
+            if (e.isRetryable) {
+                pendingSubStreams.add(PendingSubStream(streamId, sessionId, isUni))
+                slog("Headers stream=$streamId → WT sub-stream blocked, queued for retry")
+                return
+            }
+            throw e
+        }
+        session.onStreamData(streamId, ByteArray(0))
+        slog("Headers stream=$streamId → WT sub-stream (session=$sessionId, uni=$isUni)")
+    }
+
+    /** Retries pending sub-stream 200 responses. Called under mutex. */
+    private fun retryPendingSubStreamsLocked(h3: KicheH3Connection, conn: KicheConnection) {
+        val iter = pendingSubStreams.iterator()
+        while (iter.hasNext()) {
+            val pending = iter.next()
+            val session = wtSessions[pending.sessionId] ?: run { iter.remove(); continue }
+            try {
+                h3.sendResponse(conn, pending.streamId, listOf(KicheH3Header(":status", "200")), fin = false)
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) continue // still blocked, try next iteration
+                iter.remove()
+                continue
+            }
+            iter.remove()
+            session.onStreamData(pending.streamId, ByteArray(0))
+            slog("Retried sub-stream ${pending.streamId} → accepted (session=${pending.sessionId})")
         }
     }
 
@@ -653,7 +685,7 @@ public class KicheApplicationEngine(
                         val chunk = responseBody.copyOfRange(offset, responseBody.size)
                         val sent = try {
                             h3.sendBody(quicConn = conn, streamId = streamId, body = chunk, fin = true)
-                        } catch (_: KicheException) {
+                        } catch (_: KicheH3Exception) {
                             0
                         }
                         if (sent > 0) offset += sent

@@ -20,17 +20,6 @@ private fun log(msg: String) {
 }
 
 /**
- * WebTransport stream type markers as defined in the spec.
- *
- * When a WebTransport stream is opened, it is prefixed with a type byte
- * followed by the session ID (varint-encoded):
- * - Bidirectional: signal byte `0x41` + session ID
- * - Unidirectional: stream type `0x54` + session ID
- */
-private const val WT_BIDI_STREAM_SIGNAL: Byte = 0x41
-private const val WT_UNI_STREAM_TYPE: Byte = 0x54
-
-/**
  * Implementation of [WebTransportSession] backed by a dedicated QUIC + H3 connection.
  *
  * The session is established by sending an Extended CONNECT request with
@@ -86,6 +75,9 @@ internal class KicheWebTransportSession(
     /** Active streams keyed by QUIC stream ID. */
     private val activeStreams = mutableMapOf<Long, KicheWebTransportStreamImpl>()
 
+    /** Accumulates close info data received on the CONNECT stream body. */
+    private val connectStreamBody = mutableListOf<ByteArray>()
+
     /**
      * Establishes the WebTransport session by sending Extended CONNECT
      * and starting the event loop.
@@ -112,13 +104,20 @@ internal class KicheWebTransportSession(
 
     override suspend fun createBidirectionalStream(): WebTransportStream {
         return mutex.withLock {
-            // Open a new QUIC bidirectional stream via H3 and prefix with WT signal
-            val streamId = openWebtransportStreamLocked(bidi = true)
+            // Use an H3 request stream as a WebTransport bidirectional stream.
+            // quiche's H3 layer manages stream IDs — raw conn.streamSend() would
+            // conflict with H3's internal stream allocation.
+            val headers = listOf(
+                KicheH3Header(":method", "CONNECT"),
+                KicheH3Header(":protocol", "webtransport-stream"),
+                KicheH3Header("wt-session-id", sessionStreamId.toString()),
+            )
+            val streamId = h3Conn.sendRequest(conn, headers, fin = false)
+            drainSendLocked()
             val stream = KicheWebTransportStreamImpl(
                 id = streamId,
                 conn = conn,
                 h3Conn = h3Conn,
-                mutex = mutex,
                 parentScope = this,
                 isBidi = true,
             )
@@ -130,12 +129,18 @@ internal class KicheWebTransportSession(
 
     override suspend fun createUnidirectionalStream(): WebTransportSendStream {
         return mutex.withLock {
-            val streamId = openWebtransportStreamLocked(bidi = false)
+            val headers = listOf(
+                KicheH3Header(":method", "CONNECT"),
+                KicheH3Header(":protocol", "webtransport-stream"),
+                KicheH3Header("wt-session-id", sessionStreamId.toString()),
+                KicheH3Header("wt-uni", "true"),
+            )
+            val streamId = h3Conn.sendRequest(conn, headers, fin = false)
+            drainSendLocked()
             val stream = KicheWebTransportStreamImpl(
                 id = streamId,
                 conn = conn,
                 h3Conn = h3Conn,
-                mutex = mutex,
                 parentScope = this,
                 isBidi = false,
             )
@@ -147,10 +152,10 @@ internal class KicheWebTransportSession(
 
     override suspend fun close(info: WebTransportCloseInfo) {
         log("close: code=${info.code} reason=${info.reason}")
-        mutex.withLock {
-            // Close the CONNECT stream to end the WT session
-            if (sessionStreamId >= 0) {
-                try {
+        try {
+            mutex.withLock {
+                // Close the CONNECT stream to end the WT session
+                if (sessionStreamId >= 0 && !conn.isClosed) {
                     conn.streamSend(
                         sessionStreamId,
                         ByteArray(0),
@@ -158,12 +163,12 @@ internal class KicheWebTransportSession(
                         true
                     )
                     drainSendLocked()
-                } catch (_: KicheException) {
-                    // Best effort
                 }
             }
+        } catch (_: Throwable) {
+            // Best effort — connection may already be closed by event loop
         }
-        _closed.complete(info)
+        if (!_closed.isCompleted) _closed.complete(info)
         cleanup()
     }
 
@@ -177,43 +182,6 @@ internal class KicheWebTransportSession(
         }
         activeStreams.clear()
         job.cancel()
-    }
-
-    /**
-     * Opens a new QUIC stream and writes the WebTransport stream header.
-     * Must be called under mutex.
-     */
-    private fun openWebtransportStreamLocked(bidi: Boolean): Long {
-        // For WebTransport, we use raw QUIC streams (not H3 request streams).
-        // The stream header is: signal/type byte + session_id (varint).
-        val header = buildStreamHeader(bidi)
-
-        // Use the next available stream ID by sending the WT header as initial data.
-        // For bidi streams, client-initiated bidi stream IDs are 0, 4, 8, ...
-        // For uni streams, client-initiated uni stream IDs are 2, 6, 10, ...
-        // quiche manages ID allocation — we just need to send on a new stream.
-        val streamId = if (bidi) {
-            conn.streamWritableNext()
-        } else {
-            // For unidirectional, use streamSend with a fresh stream ID
-            conn.streamWritableNext()
-        }
-
-        conn.streamSend(streamId, header, header.size, false)
-        drainSendLocked()
-        return streamId
-    }
-
-    private fun buildStreamHeader(bidi: Boolean): ByteArray {
-        val buf = mutableListOf<Byte>()
-        if (bidi) {
-            buf.add(WT_BIDI_STREAM_SIGNAL)
-        } else {
-            buf.add(WT_UNI_STREAM_TYPE)
-        }
-        // Encode session stream ID as varint
-        encodeVarint(sessionStreamId, buf)
-        return buf.toByteArray()
     }
 
     /**
@@ -265,9 +233,6 @@ internal class KicheWebTransportSession(
                     // Drain QUIC datagrams received
                     drainIncomingDatagramsLocked()
 
-                    // Read data from readable streams
-                    driveStreamReadsLocked(recvBuf)
-
                     // Flush outgoing QUIC packets
                     drainSendLocked()
                 }
@@ -309,20 +274,28 @@ internal class KicheWebTransportSession(
                             WebTransportException("Server rejected WebTransport session with status $status")
                         )
                     }
+                } else if (!activeStreams.containsKey(event.streamId)) {
+                    // Server-initiated sub-stream (response headers on a new stream)
+                    handleNewIncomingStreamLocked(event.streamId, recvBuf)
                 }
-                // Other header events on WT streams are ignored (WT uses raw QUIC streams)
+                // Headers on existing sub-streams are response headers — ignore
             }
 
             KicheH3EventType.Data -> {
-                // Data on the CONNECT stream — WebTransport capsule protocol (for HTTP datagrams)
                 if (event.streamId == sessionStreamId) {
+                    // Data on the CONNECT stream — may contain close info
                     while (true) {
                         val n = try {
                             h3Conn.recvBody(conn, event.streamId, recvBuf)
-                        } catch (_: KicheException) { break }
+                        } catch (_: KicheH3Exception) { break }
                         if (n <= 0) break
-                        // Parse capsule for datagrams — simplified: treat as raw datagram payload
-                        _dgramIncoming.trySend(recvBuf.copyOf(n))
+                        connectStreamBody.add(recvBuf.copyOf(n))
+                    }
+                } else {
+                    // Data on a WT sub-stream
+                    val stream = activeStreams[event.streamId]
+                    if (stream != null) {
+                        readStreamDataLocked(event.streamId, recvBuf)
                     }
                 }
             }
@@ -330,7 +303,9 @@ internal class KicheWebTransportSession(
             KicheH3EventType.Finished -> {
                 if (event.streamId == sessionStreamId) {
                     log("dispatchEvent: CONNECT stream finished — session ending")
-                    if (!_closed.isCompleted) _closed.complete(null)
+                    if (!_closed.isCompleted) {
+                        _closed.complete(parseCloseInfo())
+                    }
                 } else {
                     val stream = activeStreams[event.streamId]
                     stream?.onFinished()
@@ -361,80 +336,40 @@ internal class KicheWebTransportSession(
         }
     }
 
-    /** Reads available data from all readable streams. Called under mutex. */
-    private fun driveStreamReadsLocked(buf: ByteArray) {
-        // Check for new incoming streams (peer-initiated)
-        while (true) {
-            val streamId = conn.streamReadableNext()
-            if (streamId < 0) break
-
-            if (activeStreams.containsKey(streamId)) {
-                // Existing stream has data — read it
-                readStreamDataLocked(streamId, buf)
-            } else if (streamId != sessionStreamId) {
-                // New peer-initiated stream — create and deliver
-                handleNewIncomingStreamLocked(streamId, buf)
-            }
-        }
-    }
-
     private fun readStreamDataLocked(streamId: Long, buf: ByteArray) {
         val stream = activeStreams[streamId] ?: return
-        while (conn.streamReadable(streamId)) {
-            val result = try {
-                conn.streamRecv(streamId, buf, buf.size)
-            } catch (_: KicheException) { break }
-
-            if (result.read > 0) {
-                stream.onDataReceived(buf.copyOf(result.read))
-            }
-            if (result.fin) {
-                stream.onFinished()
-                break
-            }
+        // H3 events deliver data via Data events — read body from H3 layer
+        while (true) {
+            val n = try {
+                h3Conn.recvBody(conn, streamId, buf)
+            } catch (_: KicheH3Exception) { break }
+            if (n <= 0) break
+            stream.onDataReceived(buf.copyOf(n))
         }
     }
 
     private fun handleNewIncomingStreamLocked(streamId: Long, buf: ByteArray) {
-        // Read initial bytes to check for WT stream header
-        val result = try {
-            conn.streamRecv(streamId, buf, buf.size)
-        } catch (_: KicheException) { return }
-
-        if (result.read <= 0) return
-
-        val data = buf.copyOf(result.read)
-        // TODO: Parse WT stream header (signal byte + session ID varint)
-        // For now, accept all peer-initiated streams as WT streams
-
-        val isBidi = (streamId % 4L) == 0L // Client bidi=0, Server bidi=1 mod 4
-        val isPeerBidi = (streamId % 4L) == 1L
-        val isPeerUni = (streamId % 4L) == 3L
-
+        // Server-initiated sub-stream — arrives as an H3 request
+        // with a Headers event. Read any initial body data available.
         val stream = KicheWebTransportStreamImpl(
             id = streamId,
             conn = conn,
             h3Conn = h3Conn,
-            mutex = mutex,
             parentScope = this,
-            isBidi = isPeerBidi,
+            isBidi = true, // Server-initiated streams are bidi by default
         )
         activeStreams[streamId] = stream
 
-        // Feed the initial data (after the WT header) to the stream
-        // TODO: Strip WT header bytes before passing data
-        if (data.isNotEmpty()) {
-            stream.onDataReceived(data)
-        }
-        if (result.fin) {
-            stream.onFinished()
+        // Read any body data already available
+        while (true) {
+            val n = try {
+                h3Conn.recvBody(conn, streamId, buf)
+            } catch (_: KicheH3Exception) { break }
+            if (n <= 0) break
+            stream.onDataReceived(buf.copyOf(n))
         }
 
-        if (isPeerBidi) {
-            _incomingBidi.trySend(stream)
-        } else if (isPeerUni) {
-            _incomingUni.trySend(stream)
-        }
+        _incomingBidi.trySend(stream)
     }
 
     /** Drains outgoing datagrams from the send channel. Called under mutex. */
@@ -471,6 +406,25 @@ internal class KicheWebTransportSession(
     }
 
     /** Flushes QUIC packets. Called under mutex. */
+    /** Parses close info from accumulated CONNECT stream body data. */
+    private fun parseCloseInfo(): WebTransportCloseInfo? {
+        if (connectStreamBody.isEmpty()) return null
+        val totalSize = connectStreamBody.sumOf { it.size }
+        if (totalSize < 4) return null
+        val data = ByteArray(totalSize)
+        var offset = 0
+        for (part in connectStreamBody) {
+            part.copyInto(data, offset)
+            offset += part.size
+        }
+        val code = ((data[0].toUInt() and 0xFFu) shl 24) or
+                ((data[1].toUInt() and 0xFFu) shl 16) or
+                ((data[2].toUInt() and 0xFFu) shl 8) or
+                (data[3].toUInt() and 0xFFu)
+        val reason = if (data.size > 4) data.copyOfRange(4, data.size).decodeToString() else ""
+        return WebTransportCloseInfo(code, reason)
+    }
+
     private fun drainSendLocked() {
         while (true) {
             val result = conn.send(sendBuf, sendBuf.size) ?: break

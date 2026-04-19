@@ -352,7 +352,7 @@ internal class KicheEndpoint(
                 while (true) {
                     val n = try {
                         h3.recvBody(quicConn = c, streamId = event.streamId, buf = recvBodyBuf)
-                    } catch (_: KicheException) {
+                    } catch (_: KicheH3Exception) {
                         break
                     }
                     if (n <= 0) break
@@ -707,8 +707,8 @@ private suspend fun trySendBodyData(
             // server's h3.poll() generates a Finished event from the QUIC FIN.
             val rc = try {
                 h3Conn.sendBody(conn, streamId, ByteArray(0), fin = true)
-            } catch (e: KicheException) {
-                if (e.error.isRetryable) -1 else throw e
+            } catch (e: KicheH3Exception) {
+                if (e.isRetryable) -1 else throw e
             }
             if (rc < 0) {
                 // H3 couldn't send (likely Done due to flow control).
@@ -731,8 +731,8 @@ private suspend fun trySendBodyData(
 
         val sent = try {
             h3Conn.sendBody(conn, streamId, chunk, fin = false)
-        } catch (e: KicheException) {
-            if (!e.error.isRetryable) throw e
+        } catch (e: KicheH3Exception) {
+            if (!e.isRetryable) throw e
             0
         }
 
