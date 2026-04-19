@@ -264,8 +264,22 @@ public class KicheApplicationEngine(
                     val connId = ConnectionId(headerInfo.dcid)
                     var cs = connections[connId]
 
-                    // New connection — for now, still single-connection: destroy existing if any
+                    // New connection
                     if (cs == null) {
+                        // Reject unsupported QUIC versions with a Version Negotiation packet
+                        if (!Kiche.versionIsSupported(headerInfo.version)) {
+                            slog("serveLoop: unsupported version ${headerInfo.version}, sending version negotiation")
+                            val written = Kiche.negotiateVersion(
+                                scid = headerInfo.scid,
+                                dcid = headerInfo.dcid,
+                                out = sendBuf,
+                            )
+                            val packet = Buffer().apply { write(sendBuf, 0, written) }
+                            udpSocket.send(Datagram(packet, peerAddr))
+                            return@withLock
+                        }
+
+                        // For now, still single-connection: destroy existing if any
                         if (connections.isNotEmpty()) {
                             for (old in connections.values) old.cleanup()
                             connections.clear()
