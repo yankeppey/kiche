@@ -167,29 +167,11 @@ class TestSession(
         return Triple(len, flowId, flowIdLen)
     }
 
-    private fun encodeDgram(flowId: Long): ByteArray {
-        val varint = encodeVarint(flowId)
-        return varint + DEFAULT_DGRAM_DATA
-    }
+    private fun encodeDgram(flowId: Long): ByteArray =
+        QuicVarint.encode(flowId) + DEFAULT_DGRAM_DATA
 
-    /** Encodes a QUIC varint (only supports values 0..63 for simplicity). */
-    private fun encodeVarint(v: Long): ByteArray {
-        require(v in 0..63) { "only 1-byte varints supported in tests" }
-        return byteArrayOf(v.toByte())
-    }
-
-    /** Decodes a QUIC varint from the start of buf. Returns (value, length). */
-    private fun decodeVarint(buf: ByteArray): Pair<Long, Int> {
-        val first = buf[0].toInt() and 0xFF
-        val len = 1 shl (first shr 6)
-        // For 1-byte varints (values 0..63):
-        if (len == 1) return Pair((first and 0x3F).toLong(), 1)
-        // 2-byte (values up to 16383):
-        if (len == 2) return Pair(
-            (((first and 0x3F) shl 8) or (buf[1].toInt() and 0xFF)).toLong(), 2
-        )
-        error("varint > 2 bytes not supported in tests")
-    }
+    private fun decodeVarint(buf: ByteArray): Pair<Long, Int> =
+        QuicVarint.decode(buf, 0) ?: error("empty buffer")
 
     override fun close() {
         client.close()

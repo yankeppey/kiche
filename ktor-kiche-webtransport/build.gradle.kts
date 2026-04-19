@@ -22,6 +22,7 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            api(project(":kiche"))
             api(libs.ktor.client.core)
             api(libs.kotlinx.coroutines.core)
         }

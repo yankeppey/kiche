@@ -115,6 +115,28 @@ sealed class KichePathEvent {
     ) : KichePathEvent()
 }
 
+enum class KichePacketType(val value: Int) {
+    Initial(1),
+    Retry(2),
+    Handshake(3),
+    ZeroRTT(4),
+    Short(5),
+    VersionNegotiation(6);
+
+    companion object {
+        fun fromValue(value: Int): KichePacketType =
+            entries.first { it.value == value }
+    }
+}
+
+data class KicheHeaderInfo(
+    val version: UInt,
+    val type: KichePacketType,
+    val scid: ByteArray,
+    val dcid: ByteArray,
+    val token: ByteArray,
+)
+
 data class KicheTransportParams(
     val peerMaxIdleTimeout: Long,
     val peerMaxUdpPayloadSize: Long,

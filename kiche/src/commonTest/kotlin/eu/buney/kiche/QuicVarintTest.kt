@@ -1,4 +1,4 @@
-package eu.buney.kiche.ktor.webtransport.capsule
+package eu.buney.kiche
 
 import kotlin.test.*
 
@@ -56,10 +56,8 @@ class QuicVarintTest {
 
     @Test
     fun `decode returns null on truncated multi-byte`() {
-        // 2-byte encoding, but only 1 byte available
         val encoded = QuicVarint.encode(1337)
         assertEquals(2, encoded.size)
-        assertNull(QuicVarint.decode(encoded, 0)?.let { if (encoded.size < 2) null else it }?.takeIf { false })
         assertNull(QuicVarint.decode(encoded.copyOf(1), 0))
     }
 
