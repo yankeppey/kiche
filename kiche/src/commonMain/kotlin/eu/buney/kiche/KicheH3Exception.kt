@@ -27,6 +27,7 @@ class KicheH3Exception(
          * Checks an H3 return code and throws [KicheH3Exception] on error.
          * Silently ignores `Done` (-1), same as [KicheException.check].
          */
+        @JvmStatic
         fun check(code: Int) {
             if (code < 0) {
                 // Try H3-native error codes first (-1..-20)

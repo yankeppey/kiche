@@ -1,8 +1,7 @@
 package eu.buney.kiche
 
 actual class KicheConnection private constructor(private var handle: Long) : AutoCloseable {
-    // Fields written by JNI for streamRecv() and error outputs
-    @JvmField internal var lastStreamRecvFin: Boolean = false
+    // Field written by JNI for error outputs
     @JvmField internal var lastErrorReason: ByteArray? = null
 
     // Fields written by JNI for pathStats() address data
@@ -86,11 +85,8 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
 
     //region Streams
 
-    actual fun streamRecv(streamId: Long, buf: ByteArray, len: Int): KicheStreamRecvResult {
-        val rc = nativeStreamRecv(requireOpen(), streamId, buf, len)
-        if (rc < 0) KicheException.check(rc.toInt())
-        return KicheStreamRecvResult(read = rc.toInt(), fin = lastStreamRecvFin)
-    }
+    actual fun streamRecv(streamId: Long, buf: ByteArray, len: Int): KicheStreamRecvResult =
+        nativeStreamRecv(requireOpen(), streamId, buf, len)
 
     actual fun streamSend(streamId: Long, buf: ByteArray, len: Int, fin: Boolean): Int {
         val rc = nativeStreamSend(requireOpen(), streamId, buf, len, fin)
@@ -328,7 +324,7 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativeRecv(handle: Long, buf: ByteArray, len: Int,
         fromIp: ByteArray, fromPort: Int, toIp: ByteArray, toPort: Int): Int
     private external fun nativeSend(handle: Long, buf: ByteArray, len: Int): KicheSendResult?
-    private external fun nativeStreamRecv(handle: Long, streamId: Long, buf: ByteArray, len: Int): Long
+    private external fun nativeStreamRecv(handle: Long, streamId: Long, buf: ByteArray, len: Int): KicheStreamRecvResult
     private external fun nativeStreamSend(handle: Long, streamId: Long, buf: ByteArray, len: Int, fin: Boolean): Long
     private external fun nativeStreamShutdown(handle: Long, streamId: Long, direction: Int, err: Long): Int
     private external fun nativeStreamCapacity(handle: Long, streamId: Long): Long

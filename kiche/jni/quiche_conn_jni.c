@@ -117,7 +117,8 @@ JNI_FN(PKG, KicheConnection, nativeSend)(JNIEnv *env, jobject self, jlong handle
 
 // --- Streams ---
 
-JNIEXPORT jlong JNICALL
+// Returns a KicheStreamRecvResult, or throws KicheException on error.
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativeStreamRecv)(JNIEnv *env, jobject self, jlong handle,
         jlong streamId, jbyteArray buf, jint len) {
     jbyte *b = (*env)->GetByteArrayElements(env, buf, NULL);
@@ -126,15 +127,16 @@ JNI_FN(PKG, KicheConnection, nativeStreamRecv)(JNIEnv *env, jobject self, jlong 
     ssize_t rc = quiche_conn_stream_recv(CONN(handle), (uint64_t)streamId,
         (uint8_t *)b, (size_t)len, &fin, &error_code);
     (*env)->ReleaseByteArrayElements(env, buf, b, 0);
-    // Pack: high 32 bits = read count (or error), low bit of high byte = fin flag
-    // Actually simpler: return read count, store fin in field
-    static jfieldID fFin = NULL;
-    if (!fFin) {
-        jclass cls = (*env)->GetObjectClass(env, self);
-        fFin = (*env)->GetFieldID(env, cls, "lastStreamRecvFin", "Z");
+    if (rc < 0) { throw_kiche_exception(env, (int)rc); return NULL; }
+
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheStreamRecvResult");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(IZ)V");
     }
-    (*env)->SetBooleanField(env, self, fFin, fin);
-    return (jlong)rc;
+    return (*env)->NewObject(env, cls, ctor, (jint)rc, (jboolean)fin);
 }
 
 JNIEXPORT jlong JNICALL
