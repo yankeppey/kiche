@@ -303,13 +303,7 @@ public class KicheApplicationEngine(
                             return@withLock
                         }
 
-                        // For now, still single-connection: destroy existing if any
-                        if (connections.isNotEmpty()) {
-                            for (old in connections.values) old.cleanup()
-                            connections.clear()
-                        }
-
-                        slog("serveLoop: accepting new connection from ${peerAddr.port}")
+                        slog("serveLoop: accepting new connection from ${peerAddr.port} (active=${connections.size})")
                         val connScope = CoroutineScope(
                             scope.coroutineContext + SupervisorJob(scope.coroutineContext.job)
                         )
@@ -839,6 +833,7 @@ public class KicheApplicationEngine(
             while (true) {
                 val result = conn.send(buf, buf.size) ?: break
                 val packet = Buffer().apply { write(buf, 0, result.written) }
+                // TODO: use result.to for multi-path / connection migration support
                 socket.send(Datagram(packet, peerAddr))
             }
         }
