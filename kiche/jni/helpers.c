@@ -54,6 +54,66 @@ jobject make_kiche_address(JNIEnv *env, const uint8_t *ip, int ip_len, int port)
     return (*env)->NewObject(env, cls, ctor, ipArr, port);
 }
 
+// Build a KicheSendResult Java object from written count + quiche_send_info.
+// An alternative approach is to pass pre-allocated reusable buffers from Kotlin and fill
+// them in C (avoids NewObject/NewByteArray allocations). We chose object construction here
+// because the marginal allocation cost (~300-500ns) is dwarfed by quiche_conn_send itself
+// (~1-10us for encryption + framing), and it yields a cleaner Kotlin API with no mutable
+// sidecar state on KicheConnection.
+jobject make_send_result(JNIEnv *env, int written, const quiche_send_info *si) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheSendResult");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>",
+            "(ILeu/buney/kiche/KicheAddress;Leu/buney/kiche/KicheAddress;J)V");
+    }
+
+    uint8_t ip_buf[16]; int ip_len, port;
+
+    extract_sockaddr(&si->from, ip_buf, &ip_len, &port);
+    jobject fromAddr = make_kiche_address(env, ip_buf, ip_len, port);
+
+    extract_sockaddr(&si->to, ip_buf, &ip_len, &port);
+    jobject toAddr = make_kiche_address(env, ip_buf, ip_len, port);
+
+    long at_nanos = (long)si->at.tv_sec * 1000000000L + (long)si->at.tv_nsec;
+
+    jobject result = (*env)->NewObject(env, cls, ctor,
+        (jint)written, fromAddr, toAddr, (jlong)at_nanos);
+
+    (*env)->DeleteLocalRef(env, fromAddr);
+    (*env)->DeleteLocalRef(env, toAddr);
+    return result;
+}
+
+// Throw a KicheException for a quiche error code by calling KicheException.check().
+// After this call, a Java exception is pending — the caller must return immediately.
+void throw_kiche_exception(JNIEnv *env, int code) {
+    static jclass cls = NULL;
+    static jmethodID checkMethod = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheException");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        checkMethod = (*env)->GetStaticMethodID(env, cls, "check", "(I)V");
+    }
+    (*env)->CallStaticVoidMethod(env, cls, checkMethod, (jint)code);
+}
+
+// Throw a KicheH3Exception for an H3 error code by calling KicheH3Exception.check().
+// After this call, a Java exception is pending — the caller must return immediately.
+void throw_kiche_h3_exception(JNIEnv *env, int code) {
+    static jclass cls = NULL;
+    static jmethodID checkMethod = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheH3Exception");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        checkMethod = (*env)->GetStaticMethodID(env, cls, "check", "(I)V");
+    }
+    (*env)->CallStaticVoidMethod(env, cls, checkMethod, (jint)code);
+}
+
 // Helper to fill sockaddr from a KicheAddress Java object.
 socklen_t fill_sockaddr_from_address(JNIEnv *env, struct sockaddr_storage *ss,
                                      jbyteArray ip, jint port) {

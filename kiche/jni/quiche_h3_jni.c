@@ -82,10 +82,8 @@ JNI_FN(PKG, KicheH3Connection, nativePoll)(JNIEnv *env, jobject self,
     quiche_h3_event *ev = NULL;
     int64_t stream_id = quiche_h3_conn_poll(H3(handle), CONN(quicConn), &ev);
 
-    if (stream_id < 0) {
-        // DONE or error
-        return NULL;
-    }
+    if (stream_id == QUICHE_H3_ERR_DONE) return NULL;
+    if (stream_id < 0) { throw_kiche_h3_exception(env, (int)stream_id); return NULL; }
 
     int event_type = (int)quiche_h3_event_type(ev);
 
