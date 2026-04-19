@@ -5,12 +5,6 @@
 
 #define CONN(handle) ((quiche_conn *)(intptr_t)(handle))
 
-// From helpers.c
-extern socklen_t fill_sockaddr(struct sockaddr_storage *ss, const uint8_t *ip, int ip_len, int port);
-extern void extract_sockaddr(const struct sockaddr_storage *ss, uint8_t *out_ip, int *out_ip_len, int *out_port);
-extern jobject make_kiche_address(JNIEnv *env, const uint8_t *ip, int ip_len, int port);
-extern socklen_t fill_sockaddr_from_address(JNIEnv *env, struct sockaddr_storage *ss, jbyteArray ip, jint port);
-
 // --- Lifecycle ---
 
 JNIEXPORT jlong JNICALL
