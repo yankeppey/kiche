@@ -850,7 +850,9 @@ JNI_FN(PKG, KicheConnection, nativePathEventNext)(JNIEnv *env, jobject self, jlo
                 quiche_path_event_closed(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
             case QUICHE_PATH_EVENT_PEER_MIGRATED:
                 quiche_path_event_peer_migrated(ev, &local_ss, &local_len, &peer_ss, &peer_len); break;
-            default: break;
+            default:
+                quiche_path_event_free(ev);
+                return NULL;
         }
         quiche_path_event_free(ev);
 
