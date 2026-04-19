@@ -1062,4 +1062,537 @@ class KicheConnectionTest {
     }
 
     //endregion
+
+    //region tests.rs:path_validation (line 10398)
+
+    /**
+     * Ported from tests.rs:path_validation()
+     * Client probes a new path, path gets validated, server sees New + Validated events.
+     * Server can then re-probe the path without triggering client events.
+     */
+    @Test
+    fun testPathValidation() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+        }
+
+        val pipe = TestPipe.newWithExchangedCids(clientConfig, serverConfig, additionalCids = 1)
+        pipe.use {
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+
+            // Now the path probing can work.
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+
+            // But the server cannot probe a yet-unseen path.
+            assertFailsWith<KicheException> {
+                pipe.server.probePath(serverAddr, clientAddr2)
+            }
+
+            pipe.advance()
+
+            // The path should be validated.
+            assertEquals(
+                KichePathEvent.Validated(clientAddr2, serverAddr),
+                pipe.client.pathEventNext()
+            )
+            assertNull(pipe.client.pathEventNext())
+
+            // The server should be notified of this new path.
+            assertEquals(
+                KichePathEvent.New(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.Validated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertNull(pipe.server.pathEventNext())
+
+            // The server can later probe the path again.
+            assertEquals(1L, pipe.server.probePath(serverAddr, clientAddr2))
+
+            // This should not trigger any event at client side.
+            assertNull(pipe.client.pathEventNext())
+            assertNull(pipe.server.pathEventNext())
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:connection_migration (line 10984)
+
+    /**
+     * Ported from tests.rs:connection_migration()
+     * Tests four migration cases:
+     * 1) Probe, validate, then migrate to validated path
+     * 2) Migrate to unvalidated path (triggers validation + migration)
+     * 3) Migrate to current active path (no-op)
+     * 4) Migrate without spare CIDs (OutOfIdentifiers error)
+     */
+    @Test
+    fun testConnectionMigration() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(3)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamDataUni(10)
+            setInitialMaxStreamsBidi(3)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(3)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamDataUni(10)
+            setInitialMaxStreamsBidi(3)
+        }
+
+        TestPipe.newWithExchangedCids(clientConfig, serverConfig, additionalCids = 2).use { pipe ->
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+            val clientAddr3 = TestPipe.CLIENT_ADDR_3
+
+            // Case 1: probe, validate, then migrate to validated path.
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+            pipe.advance()
+            assertEquals(
+                KichePathEvent.Validated(clientAddr2, serverAddr),
+                pipe.client.pathEventNext()
+            )
+            assertNull(pipe.client.pathEventNext())
+            assertEquals(
+                KichePathEvent.New(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.Validated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertTrue(pipe.client.isPathValidated(clientAddr2, serverAddr))
+            assertTrue(pipe.server.isPathValidated(serverAddr, clientAddr2))
+
+            // Server cannot initiate connection migration.
+            assertFailsWith<KicheException> {
+                pipe.server.migrate(serverAddr, clientAddr2)
+            }
+
+            assertEquals(1L, pipe.client.migrate(clientAddr2, serverAddr))
+            pipe.client.streamSend(0, "data".encodeToByteArray(), 4, fin = true)
+            pipe.advance()
+
+            assertEquals(
+                KichePathEvent.PeerMigrated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertNull(pipe.server.pathEventNext())
+
+            // Case 2: migrate on a path that was not previously validated.
+            assertEquals(2L, pipe.client.migrate(clientAddr3, serverAddr))
+            pipe.client.streamSend(4, "data".encodeToByteArray(), 4, fin = true)
+            pipe.advance()
+
+            assertEquals(
+                KichePathEvent.New(serverAddr, clientAddr3),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.Validated(serverAddr, clientAddr3),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.PeerMigrated(serverAddr, clientAddr3),
+                pipe.server.pathEventNext()
+            )
+            assertNull(pipe.server.pathEventNext())
+
+            // Case 3: migrate to current active path — no-op.
+            assertEquals(2L, pipe.client.migrate(clientAddr3, serverAddr))
+            pipe.client.streamSend(8, "data".encodeToByteArray(), 4, fin = true)
+            pipe.advance()
+            assertNull(pipe.client.pathEventNext())
+            assertNull(pipe.server.pathEventNext())
+
+            // Case 4: no spare CIDs → OutOfIdentifiers.
+            val clientAddr4 = KicheAddress(byteArrayOf(127, 0, 0, 1), 8908)
+            assertFailsWith<KicheException> {
+                pipe.client.migrate(clientAddr4, serverAddr)
+            }
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:retiring_active_path_dcid (line 10770)
+
+    /**
+     * Ported from tests.rs:retiring_active_path_dcid()
+     * Cannot retire the DCID of the active path after probing.
+     */
+    @Test
+    fun testRetiringActivePathDcid() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+        }
+
+        TestPipe.newWithExchangedCids(clientConfig, serverConfig, additionalCids = 1).use { pipe ->
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+
+            assertFailsWith<KicheException> {
+                pipe.client.retireDcid(0)
+            }
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:path_probing_dos (line 10701)
+
+    /**
+     * Ported from tests.rs:path_probing_dos()
+     * Forged packets reusing an unverified path's CID over a different 4-tuple
+     * triggers ReusedSourceConnectionId event.
+     */
+    @Test
+    fun testPathProbingDos() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+        }
+
+        TestPipe.newWithExchangedCids(clientConfig, serverConfig, additionalCids = 1).use { pipe ->
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+            val clientAddr3 = TestPipe.CLIENT_ADDR_3
+
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+            pipe.advance()
+
+            // Path validated.
+            assertEquals(
+                KichePathEvent.Validated(clientAddr2, serverAddr),
+                pipe.client.pathEventNext()
+            )
+            assertNull(pipe.client.pathEventNext())
+
+            assertEquals(
+                KichePathEvent.New(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.Validated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertNull(pipe.server.pathEventNext())
+
+            // Forge a packet: re-probe but tamper the source address.
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+            val flight = pipe.emitFlight(pipe.client)
+            val spoofedFlight = flight.map { (pkt, si) -> pkt to si.copy(from = clientAddr3) }
+            pipe.processFlight(pipe.server, spoofedFlight)
+
+            val event = pipe.server.pathEventNext()
+            assertTrue(event is KichePathEvent.ReusedSourceConnectionId)
+            assertEquals(1L, event.id)
+            assertEquals(serverAddr, event.oldLocal)
+            assertEquals(clientAddr2, event.oldPeer)
+            assertEquals(serverAddr, event.local)
+            assertEquals(clientAddr3, event.peer)
+            assertNull(pipe.server.pathEventNext())
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:send_on_path_test (line 10796)
+
+    /**
+     * Ported from tests.rs:send_on_path_test()
+     * Tests sendOnPath with explicit from/to addresses and pathsIter.
+     */
+    @Test
+    fun testSendOnPath() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setInitialMaxData(100000)
+            setInitialMaxStreamDataBidiLocal(100000)
+            setInitialMaxStreamDataBidiRemote(100000)
+            setInitialMaxStreamsBidi(2)
+            setActiveConnectionIdLimit(4)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setInitialMaxData(100000)
+            setInitialMaxStreamDataBidiLocal(100000)
+            setInitialMaxStreamDataBidiRemote(100000)
+            setInitialMaxStreamsBidi(2)
+            setActiveConnectionIdLimit(4)
+        }
+
+        TestPipe.newWithExchangedCids(clientConfig, serverConfig, additionalCids = 3).use { pipe ->
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr = TestPipe.CLIENT_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+            val clientAddr3 = TestPipe.CLIENT_ADDR_3
+            val serverAddr2 = TestPipe.SERVER_ADDR_2
+
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+
+            val buf = ByteArray(65535)
+
+            // Nothing to send on initial path.
+            assertNull(pipe.client.sendOnPath(buf, buf.size, clientAddr, serverAddr))
+
+            // Client should send padded PATH_CHALLENGE from client_addr_2.
+            val result = pipe.client.sendOnPath(buf, buf.size, clientAddr2, serverAddr)
+            assertNotNull(result)
+            assertEquals(clientAddr2, result.from)
+            assertEquals(serverAddr, result.to)
+
+            // Feed it to server.
+            pipe.server.recv(buf, result.written, result.from, result.to)
+
+            // Probe additional paths.
+            assertEquals(2L, pipe.client.probePath(clientAddr, serverAddr2))
+            assertEquals(3L, pipe.client.probePath(clientAddr3, serverAddr))
+            // Data to fit in packets.
+            pipe.client.streamSend(0, ByteArray(1201), 1201, fin = true)
+
+            // PATH_CHALLENGE on (clientAddr → serverAddr2).
+            val result2 = pipe.client.sendOnPath(buf, buf.size, clientAddr, null)
+            assertNotNull(result2)
+            assertEquals(clientAddr, result2.from)
+            assertEquals(serverAddr2, result2.to)
+            pipe.server.recv(buf, result2.written, result2.from, result2.to)
+
+            // STREAM frame on active path (clientAddr → serverAddr).
+            val result3 = pipe.client.sendOnPath(buf, buf.size, clientAddr, null)
+            assertNotNull(result3)
+            assertEquals(clientAddr, result3.from)
+            assertEquals(serverAddr, result3.to)
+            pipe.server.recv(buf, result3.written, result3.from, result3.to)
+
+            // PATH_CHALLENGE on (clientAddr3 → serverAddr).
+            val result4 = pipe.client.sendOnPath(buf, buf.size, null, serverAddr)
+            assertNotNull(result4)
+            assertEquals(clientAddr3, result4.from)
+            assertEquals(serverAddr, result4.to)
+            pipe.server.recv(buf, result4.written, result4.from, result4.to)
+
+            // STREAM frame on active path.
+            val result5 = pipe.client.sendOnPath(buf, buf.size, null, serverAddr)
+            assertNotNull(result5)
+            assertEquals(clientAddr, result5.from)
+            assertEquals(serverAddr, result5.to)
+            pipe.server.recv(buf, result5.written, result5.from, result5.to)
+
+            // No more data → null (Done).
+            assertNull(pipe.client.sendOnPath(buf, buf.size, clientAddr, null))
+            assertNull(pipe.client.sendOnPath(buf, buf.size, null, serverAddr))
+
+            pipe.advance()
+
+            // Verify paths_iter results.
+            val pathsFromClient = pipe.client.pathsIter(clientAddr).sortedBy { it.port }
+            assertEquals(
+                listOf(serverAddr, serverAddr2).sortedBy { it.port },
+                pathsFromClient
+            )
+
+            val pathsFromClient2 = pipe.client.pathsIter(clientAddr2)
+            assertEquals(listOf(serverAddr), pathsFromClient2)
+
+            val pathsFromClient3 = pipe.client.pathsIter(clientAddr3)
+            assertEquals(listOf(serverAddr), pathsFromClient3)
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:connection_migration_zero_length_cid (line 11200)
+
+    /**
+     * Ported from tests.rs:connection_migration_zero_length_cid()
+     * Migration with zero-length client SCIDs still works.
+     */
+    @Test
+    fun testConnectionMigrationZeroLengthCid() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamDataUni(10)
+            setInitialMaxStreamsBidi(3)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamDataUni(10)
+            setInitialMaxStreamsBidi(3)
+        }
+
+        TestPipe.newWithExchangedCids(clientConfig, serverConfig,
+            additionalCids = 1, clientScidLen = 0).use { pipe ->
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+
+            // Migrate to unvalidated path with spare DCIDs.
+            assertEquals(1L, pipe.client.migrate(clientAddr2, serverAddr))
+            pipe.client.streamSend(4, "data".encodeToByteArray(), 4, fin = true)
+            pipe.advance()
+
+            assertEquals(
+                KichePathEvent.New(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.Validated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.PeerMigrated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertNull(pipe.server.pathEventNext())
+        }
+    }
+
+    //endregion
+
+    //region tests.rs:connection_migration_reordered_non_probing (line 11280)
+
+    /**
+     * Ported from tests.rs:connection_migration_reordered_non_probing()
+     * Reordered non-probing packets from different addresses should not
+     * trigger spurious migration.
+     */
+    @Test
+    fun testConnectionMigrationReorderedNonProbing() {
+        val certDir = quicheCertDir()
+
+        val clientConfig = KicheConfig().apply {
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamDataUni(10)
+            setInitialMaxStreamsBidi(3)
+        }
+        val serverConfig = KicheConfig().apply {
+            loadCertChainFromPemFile("$certDir/cert.crt")
+            loadPrivKeyFromPemFile("$certDir/cert.key")
+            setApplicationProtos(TestPipe.PROTOS)
+            verifyPeer(false)
+            setActiveConnectionIdLimit(2)
+            setInitialMaxData(30)
+            setInitialMaxStreamDataBidiLocal(15)
+            setInitialMaxStreamDataBidiRemote(15)
+            setInitialMaxStreamDataUni(10)
+            setInitialMaxStreamsBidi(3)
+        }
+
+        TestPipe.newWithExchangedCids(clientConfig, serverConfig, additionalCids = 1).use { pipe ->
+            val serverAddr = TestPipe.SERVER_ADDR
+            val clientAddr2 = TestPipe.CLIENT_ADDR_2
+
+            assertEquals(1L, pipe.client.probePath(clientAddr2, serverAddr))
+            pipe.advance()
+
+            assertEquals(
+                KichePathEvent.Validated(clientAddr2, serverAddr),
+                pipe.client.pathEventNext()
+            )
+            assertNull(pipe.client.pathEventNext())
+            assertEquals(
+                KichePathEvent.New(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertEquals(
+                KichePathEvent.Validated(serverAddr, clientAddr2),
+                pipe.server.pathEventNext()
+            )
+            assertNull(pipe.server.pathEventNext())
+
+            // First flight from secondary address.
+            pipe.client.streamSend(0, "data".encodeToByteArray(), 4, fin = true)
+            val first = pipe.emitFlight(pipe.client)
+            val firstSpoofed = first.map { (pkt, si) -> pkt to si.copy(from = clientAddr2) }
+
+            // Second flight from original address.
+            pipe.client.streamSend(4, "data".encodeToByteArray(), 4, fin = true)
+            val second = pipe.emitFlight(pipe.client)
+
+            // Deliver second before first (reordering).
+            pipe.processFlight(pipe.server, second)
+            pipe.processFlight(pipe.server, firstSpoofed)
+
+            // Server does NOT migrate due to reordering.
+            assertNull(pipe.server.pathEventNext())
+        }
+    }
+
+    //endregion
 }

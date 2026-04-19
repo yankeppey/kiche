@@ -242,6 +242,176 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
     }
     //endregion
 
+    //region Path migration & multi-path
+
+    actual fun probePath(local: KicheAddress, peer: KicheAddress): Long = memScoped {
+        val localSs = alloc<sockaddr_storage>()
+        val localLen = fillSockaddr(localSs.ptr, local)
+        val peerSs = alloc<sockaddr_storage>()
+        val peerLen = fillSockaddr(peerSs.ptr, peer)
+        val seq = alloc<ULongVar>()
+        val rc = quiche_conn_probe_path(conn(),
+            localSs.ptr.reinterpret(), localLen,
+            peerSs.ptr.reinterpret(), peerLen, seq.ptr)
+        if (rc < 0) KicheException.check(rc)
+        seq.value.toLong()
+    }
+
+    actual fun isPathValidated(local: KicheAddress, peer: KicheAddress): Boolean = memScoped {
+        val localSs = alloc<sockaddr_storage>()
+        val localLen = fillSockaddr(localSs.ptr, local)
+        val peerSs = alloc<sockaddr_storage>()
+        val peerLen = fillSockaddr(peerSs.ptr, peer)
+        val rc = quiche_conn_is_path_validated(conn(),
+            localSs.ptr.reinterpret(), localLen.toULong(),
+            peerSs.ptr.reinterpret(), peerLen.toULong())
+        if (rc < 0) KicheException.check(rc)
+        rc == 1
+    }
+
+    actual fun migrateSource(local: KicheAddress): Long = memScoped {
+        val localSs = alloc<sockaddr_storage>()
+        val localLen = fillSockaddr(localSs.ptr, local)
+        val seq = alloc<ULongVar>()
+        val rc = quiche_conn_migrate_source(conn(),
+            localSs.ptr.reinterpret(), localLen, seq.ptr)
+        if (rc < 0) KicheException.check(rc)
+        seq.value.toLong()
+    }
+
+    actual fun migrate(local: KicheAddress, peer: KicheAddress): Long = memScoped {
+        val localSs = alloc<sockaddr_storage>()
+        val localLen = fillSockaddr(localSs.ptr, local)
+        val peerSs = alloc<sockaddr_storage>()
+        val peerLen = fillSockaddr(peerSs.ptr, peer)
+        val seq = alloc<ULongVar>()
+        val rc = quiche_conn_migrate(conn(),
+            localSs.ptr.reinterpret(), localLen,
+            peerSs.ptr.reinterpret(), peerLen, seq.ptr)
+        if (rc < 0) KicheException.check(rc)
+        seq.value.toLong()
+    }
+
+    actual fun pathEventNext(): KichePathEvent? = memScoped {
+        val ev = quiche_conn_path_event_next(conn()) ?: return null
+        try {
+            val type = quiche_path_event_type(ev)
+            when (type) {
+                QUICHE_PATH_EVENT_REUSED_SOURCE_CONNECTION_ID -> {
+                    val id = alloc<ULongVar>()
+                    val oldLocalSs = alloc<sockaddr_storage>(); val oldLocalLen = alloc<UIntVar>()
+                    val oldPeerSs = alloc<sockaddr_storage>(); val oldPeerLen = alloc<UIntVar>()
+                    val localSs = alloc<sockaddr_storage>(); val localLen = alloc<UIntVar>()
+                    val peerSs = alloc<sockaddr_storage>(); val peerLen = alloc<UIntVar>()
+                    quiche_path_event_reused_source_connection_id(ev, id.ptr,
+                        oldLocalSs.ptr, oldLocalLen.ptr, oldPeerSs.ptr, oldPeerLen.ptr,
+                        localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                    KichePathEvent.ReusedSourceConnectionId(
+                        id = id.value.toLong(),
+                        oldLocal = extractSockaddr(oldLocalSs.ptr),
+                        oldPeer = extractSockaddr(oldPeerSs.ptr),
+                        local = extractSockaddr(localSs.ptr),
+                        peer = extractSockaddr(peerSs.ptr),
+                    )
+                }
+                else -> {
+                    val localSs = alloc<sockaddr_storage>(); val localLen = alloc<UIntVar>()
+                    val peerSs = alloc<sockaddr_storage>(); val peerLen = alloc<UIntVar>()
+                    when (type) {
+                        QUICHE_PATH_EVENT_NEW ->
+                            quiche_path_event_new(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        QUICHE_PATH_EVENT_VALIDATED ->
+                            quiche_path_event_validated(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        QUICHE_PATH_EVENT_FAILED_VALIDATION ->
+                            quiche_path_event_failed_validation(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        QUICHE_PATH_EVENT_CLOSED ->
+                            quiche_path_event_closed(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        QUICHE_PATH_EVENT_PEER_MIGRATED ->
+                            quiche_path_event_peer_migrated(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        else -> error("Unknown path event type: $type")
+                    }
+                    val local = extractSockaddr(localSs.ptr)
+                    val peer = extractSockaddr(peerSs.ptr)
+                    when (type) {
+                        QUICHE_PATH_EVENT_NEW -> KichePathEvent.New(local, peer)
+                        QUICHE_PATH_EVENT_VALIDATED -> KichePathEvent.Validated(local, peer)
+                        QUICHE_PATH_EVENT_FAILED_VALIDATION -> KichePathEvent.FailedValidation(local, peer)
+                        QUICHE_PATH_EVENT_CLOSED -> KichePathEvent.Closed(local, peer)
+                        QUICHE_PATH_EVENT_PEER_MIGRATED -> KichePathEvent.PeerMigrated(local, peer)
+                        else -> error("Unknown path event type: $type")
+                    }
+                }
+            }
+        } finally {
+            quiche_path_event_free(ev)
+        }
+    }
+
+    actual fun sendOnPath(buf: ByteArray, len: Int, from: KicheAddress?, to: KicheAddress?): KicheSendResult? = memScoped {
+        val si = alloc<quiche_send_info>()
+        val fromSs = from?.let { alloc<sockaddr_storage>() }
+        val fromLen = from?.let { fillSockaddr(fromSs!!.ptr, it) } ?: 0u
+        val toSs = to?.let { alloc<sockaddr_storage>() }
+        val toLen = to?.let { fillSockaddr(toSs!!.ptr, it) } ?: 0u
+
+        buf.usePinned { pinned ->
+            val written = quiche_conn_send_on_path(conn(),
+                pinned.addressOf(0).reinterpret(), len.toULong(),
+                fromSs?.ptr?.reinterpret(), fromLen,
+                toSs?.ptr?.reinterpret(), toLen,
+                si.ptr)
+            if (written == QUICHE_ERR_DONE.toLong()) return null
+            if (written < 0) return null
+
+            val fromAddr = extractSockaddr(si.from.ptr)
+            val toAddr = extractSockaddr(si.to.ptr)
+            val atNanos = si.at.tv_sec * 1_000_000_000L + si.at.tv_nsec
+            KicheSendResult(written.toInt(), fromAddr, toAddr, atNanos)
+        }
+    }
+
+    actual fun sendQuantumOnPath(local: KicheAddress, peer: KicheAddress): Long = memScoped {
+        val localSs = alloc<sockaddr_storage>()
+        val localLen = fillSockaddr(localSs.ptr, local)
+        val peerSs = alloc<sockaddr_storage>()
+        val peerLen = fillSockaddr(peerSs.ptr, peer)
+        quiche_conn_send_quantum_on_path(conn(),
+            localSs.ptr.reinterpret(), localLen.toULong(),
+            peerSs.ptr.reinterpret(), peerLen.toULong()).toLong()
+    }
+
+    actual fun sendAckElicitingOnPath(local: KicheAddress, peer: KicheAddress): Boolean = memScoped {
+        val localSs = alloc<sockaddr_storage>()
+        val localLen = fillSockaddr(localSs.ptr, local)
+        val peerSs = alloc<sockaddr_storage>()
+        val peerLen = fillSockaddr(peerSs.ptr, peer)
+        val rc = quiche_conn_send_ack_eliciting_on_path(conn(),
+            localSs.ptr.reinterpret(), localLen.toULong(),
+            peerSs.ptr.reinterpret(), peerLen.toULong())
+        if (rc < 0) KicheException.check(rc.toInt())
+        rc == 0L
+    }
+
+    actual fun pathsIter(from: KicheAddress): List<KicheAddress> = memScoped {
+        val fromSs = alloc<sockaddr_storage>()
+        val fromLen = fillSockaddr(fromSs.ptr, from)
+        val iter = quiche_conn_paths_iter(conn(),
+            fromSs.ptr.reinterpret(), fromLen.toULong()) ?: return emptyList()
+        try {
+            val result = mutableListOf<KicheAddress>()
+            val peerSs = alloc<sockaddr_storage>()
+            val peerLen = alloc<ULongVar>()
+            while (quiche_socket_addr_iter_next(iter, peerSs.ptr, peerLen.ptr)) {
+                result.add(extractSockaddr(peerSs.ptr))
+            }
+            result
+        } finally {
+            quiche_socket_addr_iter_free(iter)
+        }
+    }
+
+    //endregion
+
     //region TLS / session
     actual fun setSession(session: ByteArray) {
         session.usePinned { pinned ->

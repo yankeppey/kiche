@@ -1,5 +1,12 @@
 package eu.buney.kiche
 
+private val IPV6_HEX_FORMAT = HexFormat {
+    bytes {
+        bytesPerGroup = 2
+        groupSeparator = ":"
+    }
+}
+
 enum class KicheCcAlgorithm(val value: Int) {
     Reno(0),
     Cubic(1),
@@ -16,6 +23,23 @@ class KicheAddress(
     val port: Int,
 ) {
     val isIpv6: Boolean get() = ip.size == 16
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is KicheAddress) return false
+        return port == other.port && ip.contentEquals(other.ip)
+    }
+
+    override fun hashCode(): Int = ip.contentHashCode() * 31 + port
+
+    override fun toString(): String {
+        val ipStr = if (isIpv6) {
+            ip.toHexString(IPV6_HEX_FORMAT)
+        } else {
+            ip.joinToString(".") { (it.toInt() and 0xFF).toString() }
+        }
+        return "$ipStr:$port"
+    }
 }
 
 data class KicheSendResult(
@@ -75,6 +99,21 @@ data class KichePathStats(
     val pmtu: Long,
     val deliveryRate: Long,
 )
+
+sealed class KichePathEvent {
+    data class New(val local: KicheAddress, val peer: KicheAddress) : KichePathEvent()
+    data class Validated(val local: KicheAddress, val peer: KicheAddress) : KichePathEvent()
+    data class FailedValidation(val local: KicheAddress, val peer: KicheAddress) : KichePathEvent()
+    data class Closed(val local: KicheAddress, val peer: KicheAddress) : KichePathEvent()
+    data class PeerMigrated(val local: KicheAddress, val peer: KicheAddress) : KichePathEvent()
+    data class ReusedSourceConnectionId(
+        val id: Long,
+        val oldLocal: KicheAddress,
+        val oldPeer: KicheAddress,
+        val local: KicheAddress,
+        val peer: KicheAddress,
+    ) : KichePathEvent()
+}
 
 data class KicheTransportParams(
     val peerMaxIdleTimeout: Long,

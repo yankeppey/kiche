@@ -21,7 +21,10 @@ class TestPipe(
 
     companion object {
         val CLIENT_ADDR = KicheAddress(byteArrayOf(127, 0, 0, 1), 1234)
+        val CLIENT_ADDR_2 = KicheAddress(byteArrayOf(127, 0, 0, 1), 5678)
+        val CLIENT_ADDR_3 = KicheAddress(byteArrayOf(127, 0, 0, 1), 9012)
         val SERVER_ADDR = KicheAddress(byteArrayOf(127, 0, 0, 1), 4321)
+        val SERVER_ADDR_2 = KicheAddress(byteArrayOf(127, 0, 0, 1), 8765)
 
         val PROTOS = byteArrayOf(
             0x06, 'p'.code.toByte(), 'r'.code.toByte(), 'o'.code.toByte(),
@@ -183,9 +186,14 @@ class TestPipe(
             return createPipe(clientConfig, serverConfig)
         }
 
-        private fun createPipe(clientConfig: KicheConfig, serverConfig: KicheConfig): TestPipe {
-            val clientScid = ByteArray(16) { (it + 0xC0).toByte() }
-            val serverScid = ByteArray(16) { (it + 0x50).toByte() }
+        private fun createPipe(
+            clientConfig: KicheConfig,
+            serverConfig: KicheConfig,
+            clientScidLen: Int = 16,
+            serverScidLen: Int = 16,
+        ): TestPipe {
+            val clientScid = ByteArray(clientScidLen) { (it + 0xC0).toByte() }
+            val serverScid = ByteArray(serverScidLen) { (it + 0x50).toByte() }
 
             val client = KicheConnection.connect(
                 serverName = "quic.tech", scid = clientScid,
@@ -197,6 +205,36 @@ class TestPipe(
             )
 
             return TestPipe(client, server, clientConfig, serverConfig)
+        }
+
+        /**
+         * Creates a pipe with exchanged connection IDs (matching quiche's
+         * pipe_with_exchanged_cids). Handshakes, registers additional CIDs
+         * on both sides, and exchanges them.
+         */
+        fun newWithExchangedCids(
+            clientConfig: KicheConfig,
+            serverConfig: KicheConfig,
+            additionalCids: Int = 1,
+            clientScidLen: Int = 16,
+            serverScidLen: Int = 16,
+        ): TestPipe {
+            val pipe = createPipe(clientConfig, serverConfig, clientScidLen, serverScidLen)
+            pipe.handshake()
+
+            for (i in 0 until additionalCids) {
+                val clientCid = ByteArray(clientScidLen).also { kotlin.random.Random.nextBytes(it) }
+                val clientResetToken = ByteArray(16).also { kotlin.random.Random.nextBytes(it) }
+                pipe.client.newScid(clientCid, clientResetToken, retireIfNeeded = true)
+
+                val serverCid = ByteArray(serverScidLen).also { kotlin.random.Random.nextBytes(it) }
+                val serverResetToken = ByteArray(16).also { kotlin.random.Random.nextBytes(it) }
+                pipe.server.newScid(serverCid, serverResetToken, retireIfNeeded = true)
+            }
+
+            pipe.advance()
+
+            return pipe
         }
 
         fun new(
@@ -277,7 +315,7 @@ class TestPipe(
     /** Sends all pending packets from server to client. */
     fun flushServer() = processFlight(client, emitFlight(server))
 
-    private fun emitFlight(conn: KicheConnection): List<Pair<ByteArray, KicheSendResult>> {
+    internal fun emitFlight(conn: KicheConnection): List<Pair<ByteArray, KicheSendResult>> {
         val flight = mutableListOf<Pair<ByteArray, KicheSendResult>>()
         while (true) {
             val result = conn.send(buf, buf.size) ?: break
@@ -287,7 +325,7 @@ class TestPipe(
         return flight
     }
 
-    private fun processFlight(conn: KicheConnection, flight: List<Pair<ByteArray, KicheSendResult>>) {
+    internal fun processFlight(conn: KicheConnection, flight: List<Pair<ByteArray, KicheSendResult>>) {
         for ((pkt, si) in flight) {
             conn.recv(buf = pkt, len = pkt.size, from = si.from, to = si.to)
         }

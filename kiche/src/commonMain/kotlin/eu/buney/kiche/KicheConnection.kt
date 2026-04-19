@@ -86,6 +86,18 @@ expect class KicheConnection : AutoCloseable {
     fun retiredScidNext(): ByteArray?
     //endregion
 
+    //region Path migration & multi-path
+    fun probePath(local: KicheAddress, peer: KicheAddress): Long
+    fun isPathValidated(local: KicheAddress, peer: KicheAddress): Boolean
+    fun migrateSource(local: KicheAddress): Long
+    fun migrate(local: KicheAddress, peer: KicheAddress): Long
+    fun pathEventNext(): KichePathEvent?
+    fun sendOnPath(buf: ByteArray, len: Int, from: KicheAddress?, to: KicheAddress?): KicheSendResult?
+    fun sendQuantumOnPath(local: KicheAddress, peer: KicheAddress): Long
+    fun sendAckElicitingOnPath(local: KicheAddress, peer: KicheAddress): Boolean
+    fun pathsIter(from: KicheAddress): List<KicheAddress>
+    //endregion
+
     //region TLS / session
     fun setSession(session: ByteArray)
     fun session(): ByteArray?
