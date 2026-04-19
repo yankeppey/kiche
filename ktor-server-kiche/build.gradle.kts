@@ -24,6 +24,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             api(project(":kiche"))
+            api(project(":ktor-kiche-webtransport"))
             api(libs.ktor.server.core)
             api(libs.ktor.network)
             implementation(libs.kotlinx.coroutines.core)

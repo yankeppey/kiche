@@ -495,8 +495,8 @@ class KicheH3Test {
         TestSession.new().use { s ->
             val stream = s.sendRequest(fin = false)
 
-            // Zero-length body without fin → should fail (Done)
-            assertEquals(-1, s.client.sendBody(s.pipe.client, stream, ByteArray(0), false))
+            // Zero-length body without fin → Done (no capacity for empty non-fin frame)
+            assertEquals(0, s.client.sendBody(s.pipe.client, stream, ByteArray(0), false))
 
             // Zero-length body with fin → accepted
             assertEquals(0, s.client.sendBody(s.pipe.client, stream, ByteArray(0), true))
@@ -523,7 +523,7 @@ class KicheH3Test {
 
             // Server responds similarly
             s.server.sendResponse(s.pipe.server, stream, TestSession.DEFAULT_RESPONSE_HEADERS, false)
-            assertEquals(-1, s.server.sendBody(s.pipe.server, stream, ByteArray(0), false))
+            assertEquals(0, s.server.sendBody(s.pipe.server, stream, ByteArray(0), false))
             assertEquals(0, s.server.sendBody(s.pipe.server, stream, ByteArray(0), true))
             s.advance()
 

@@ -42,7 +42,10 @@ actual class KicheH3Connection actual constructor(
 
     actual fun sendBody(quicConn: KicheConnection, streamId: Long, body: ByteArray, fin: Boolean): Int {
         val rc = nativeSendBody(requireOpen(), quicConn.getHandle(), streamId, body, fin)
-        if (rc < 0) KicheH3Exception.check(rc.toInt())
+        if (rc < 0) {
+            KicheH3Exception.check(rc.toInt())
+            return 0 // check() didn't throw (Done) → no bytes sent
+        }
         return rc.toInt()
     }
 
@@ -64,6 +67,9 @@ actual class KicheH3Connection actual constructor(
 
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =
         nativeDgramEnabledByPeer(requireOpen(), quicConn.getHandle())
+
+    actual fun extendedConnectEnabledByPeer(): Boolean =
+        nativeExtendedConnectEnabledByPeer(requireOpen())
 
     actual fun stats(): KicheH3Stats {
         val s = nativeStats(requireOpen())
@@ -92,6 +98,7 @@ actual class KicheH3Connection actual constructor(
         streamId: Long, buf: ByteArray): Long
     private external fun nativeSendGoaway(handle: Long, quicConnHandle: Long, id: Long): Int
     private external fun nativeDgramEnabledByPeer(handle: Long, quicConnHandle: Long): Boolean
+    private external fun nativeExtendedConnectEnabledByPeer(handle: Long): Boolean
     private external fun nativeSendResponse(handle: Long, quicConnHandle: Long,
         streamId: Long, names: Array<ByteArray>, values: Array<ByteArray>, fin: Boolean): Int
     private external fun nativeStats(handle: Long): LongArray

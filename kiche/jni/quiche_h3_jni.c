@@ -234,6 +234,12 @@ JNI_FN(PKG, KicheH3Connection, nativeDgramEnabledByPeer)(JNIEnv *env, jobject se
     return quiche_h3_dgram_enabled_by_peer(H3(handle), CONN(quicConn));
 }
 
+JNIEXPORT jboolean JNICALL
+JNI_FN(PKG, KicheH3Connection, nativeExtendedConnectEnabledByPeer)(JNIEnv *env, jobject self,
+        jlong handle) {
+    return quiche_h3_extended_connect_enabled_by_peer(H3(handle));
+}
+
 JNIEXPORT jlongArray JNICALL
 JNI_FN(PKG, KicheH3Connection, nativeStats)(JNIEnv *env, jobject self, jlong handle) {
     quiche_h3_stats stats;

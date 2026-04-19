@@ -75,13 +75,19 @@ actual class KicheH3Connection actual constructor(
             // Kotlin/Native can't take addressOf(0) on an empty array, so pass null.
             val rc = quiche_h3_send_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), null, 0u, fin)
-            if (rc < 0) KicheH3Exception.check(rc.toInt())
+            if (rc < 0) {
+                KicheH3Exception.check(rc.toInt())
+                return 0 // check() didn't throw (Done) → no bytes sent
+            }
             return rc.toInt()
         }
         body.usePinned { pinned ->
             val rc = quiche_h3_send_body(h3(), quicConn.ptr!!.reinterpret(),
                 streamId.toULong(), pinned.addressOf(0).reinterpret(), body.size.toULong(), fin)
-            if (rc < 0) KicheH3Exception.check(rc.toInt())
+            if (rc < 0) {
+                KicheH3Exception.check(rc.toInt())
+                return 0 // check() didn't throw (Done) → no bytes sent
+            }
             return rc.toInt()
         }
     }
@@ -122,6 +128,9 @@ actual class KicheH3Connection actual constructor(
 
     actual fun dgramEnabledByPeer(quicConn: KicheConnection): Boolean =
         quiche_h3_dgram_enabled_by_peer(h3(), quicConn.ptr!!.reinterpret())
+
+    actual fun extendedConnectEnabledByPeer(): Boolean =
+        quiche_h3_extended_connect_enabled_by_peer(h3())
 
     actual fun stats(): KicheH3Stats = memScoped {
         val s = alloc<quiche_h3_stats>()
