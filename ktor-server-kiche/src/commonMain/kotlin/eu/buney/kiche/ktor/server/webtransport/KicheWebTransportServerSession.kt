@@ -2,6 +2,7 @@ package eu.buney.kiche.ktor.server.webtransport
 
 import eu.buney.kiche.*
 import eu.buney.kiche.ktor.webtransport.*
+import eu.buney.kiche.QuicVarint
 import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
 import io.ktor.server.application.*
