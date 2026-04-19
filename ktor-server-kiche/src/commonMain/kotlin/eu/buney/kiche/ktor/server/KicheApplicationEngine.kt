@@ -202,7 +202,7 @@ public class KicheApplicationEngine(
         val mutex = Mutex()
         val sendSignal = Channel<Unit>(Channel.CONFLATED)
 
-        var currentConn: ConnectionState? = null
+        val connections = HashMap<ConnectionId, ConnectionState>()
 
         val sendBuf = ByteArray(65535)
 
@@ -211,8 +211,9 @@ public class KicheApplicationEngine(
             while (isActive) {
                 withTimeoutOrNull(10) { sendSignal.receive() }
                 mutex.withLock {
-                    val cs = currentConn ?: return@withLock
-                    drainSend(cs.conn, sendBuf, udpSocket, cs.peerAddr)
+                    for (cs in connections.values) {
+                        drainSend(cs.conn, sendBuf, udpSocket, cs.peerAddr)
+                    }
                 }
             }
         }
@@ -226,16 +227,20 @@ public class KicheApplicationEngine(
                 if (dgram == null) {
                     // Timeout — drive QUIC timers and poll for pending H3 events.
                     mutex.withLock {
-                        val cs = currentConn ?: return@withLock
-                        cs.conn.onTimeout()
-                        val h3 = cs.h3Conn
-                        if (h3 != null) {
-                            pollAndDispatch(h3, cs, udpSocket, mutex)
-                            driveWtSessionsLocked(h3, cs, udpSocket, sendBuf)
-                            drainSend(cs.conn, sendBuf, udpSocket, cs.peerAddr)
-                        }
-                        if (cs.requests.isNotEmpty()) {
-                            slog("timeout path: ${cs.requests.size} pending requests (streams: ${cs.requests.keys})")
+                        val iter = connections.values.iterator()
+                        while (iter.hasNext()) {
+                            val cs = iter.next()
+                            cs.conn.onTimeout()
+                            val h3 = cs.h3Conn
+                            if (h3 != null) {
+                                pollAndDispatch(h3, cs, udpSocket, mutex)
+                                driveWtSessionsLocked(h3, cs, udpSocket, sendBuf)
+                                drainSend(cs.conn, sendBuf, udpSocket, cs.peerAddr)
+                            }
+                            if (cs.conn.isClosed) {
+                                cs.cleanup()
+                                iter.remove()
+                            }
                         }
                         sendSignal.trySend(Unit)
                     }
@@ -243,42 +248,48 @@ public class KicheApplicationEngine(
                 }
 
                 val peerAddr = dgram.address as InetSocketAddress
-                val fromPort = peerAddr.port
                 val fromIp = peerAddr.resolveAddress() ?: continue
-                val from = KicheAddress(fromIp, fromPort)
+                val from = KicheAddress(fromIp, peerAddr.port)
                 val bytes = dgram.packet.readByteArray()
 
                 mutex.withLock {
-                    // New client from different port → reset
-                    currentConn?.let { cs ->
-                        if (fromPort != cs.peerAddr.port) {
-                            // Cancel in-flight response coroutines before freeing native objects
-                            cs.cleanup()
-                            currentConn = null
-                        }
+                    // Parse QUIC packet header to route by DCID
+                    val headerInfo = try {
+                        Kiche.headerInfo(buf = bytes, len = bytes.size, dcil = DCID_LEN)
+                    } catch (e: KicheException) {
+                        slog("serveLoop: failed to parse header: ${e.message}")
+                        return@withLock
                     }
 
-                    // Accept new connection
-                    if (currentConn == null) {
-                        slog("serveLoop: accepting new connection from port $fromPort")
+                    val connId = ConnectionId(headerInfo.dcid)
+                    var cs = connections[connId]
+
+                    // New connection — for now, still single-connection: destroy existing if any
+                    if (cs == null) {
+                        if (connections.isNotEmpty()) {
+                            for (old in connections.values) old.cleanup()
+                            connections.clear()
+                        }
+
+                        slog("serveLoop: accepting new connection from ${peerAddr.port}")
                         val connScope = CoroutineScope(
                             scope.coroutineContext + SupervisorJob(scope.coroutineContext.job)
                         )
-                        val scid = Random.nextBytes(16)
+                        val scid = Random.nextBytes(DCID_LEN)
                         val conn = KicheConnection.accept(
                             scid = scid, odcid = null,
                             local = localAddr, peer = from, config = quicConfig,
                         )
-                        currentConn = ConnectionState(
+                        cs = ConnectionState(
                             conn = conn,
                             peerAddr = peerAddr,
                             peerKicheAddr = from,
                             connScope = connScope,
                             dcid = scid,
                         )
+                        connections[ConnectionId(scid)] = cs
                     }
 
-                    val cs = currentConn ?: return@withLock
                     cs.conn.recv(buf = bytes, len = bytes.size, from = from, to = localAddr)
 
                     // Create H3 connection once handshake completes
@@ -297,9 +308,6 @@ public class KicheApplicationEngine(
                     }
 
                     // Flush outgoing packets (flow control updates, ACKs) immediately.
-                    // Without this, recvBody() queues MAX_STREAM_DATA frames in quiche's
-                    // output buffer but they aren't sent until the send coroutine runs,
-                    // which starves the client's flow control window on large bodies.
                     drainSend(cs.conn, sendBuf, udpSocket, cs.peerAddr)
 
                     sendSignal.trySend(Unit)
@@ -307,13 +315,14 @@ public class KicheApplicationEngine(
                     // Connection closed → cleanup
                     if (cs.conn.isClosed) {
                         cs.cleanup()
-                        currentConn = null
+                        connections.remove(connId)
                     }
                 }
             }
         } finally {
             sendJob.cancel()
-            currentConn?.cleanup()
+            for (cs in connections.values) cs.cleanup()
+            connections.clear()
         }
     }
 
@@ -739,6 +748,7 @@ public class KicheApplicationEngine(
     //endregion
 
     private companion object {
+        const val DCID_LEN = 16
         val H3_ALPN: ByteArray = byteArrayOf(2, 'h'.code.toByte(), '3'.code.toByte())
 
         suspend fun drainSend(conn: KicheConnection, buf: ByteArray, socket: BoundDatagramSocket, peerAddr: InetSocketAddress) {
