@@ -101,6 +101,31 @@ void throw_kiche_exception(JNIEnv *env, int code) {
     (*env)->CallStaticVoidMethod(env, cls, checkMethod, (jint)code);
 }
 
+// Build a KicheH3Event Java object from event type int, stream id, and optional headers list.
+// eventTypeValue is the quiche H3 event type integer; headerList may be NULL.
+jobject make_h3_event(JNIEnv *env, int eventTypeValue, int64_t streamId, jobject headerList) {
+    static jclass eventCls = NULL, eventTypeCls = NULL;
+    static jmethodID eventCtor = NULL, fromValueMethod = NULL;
+    if (!eventCls) {
+        eventCls = (*env)->FindClass(env, "eu/buney/kiche/KicheH3Event");
+        eventCls = (jclass)(*env)->NewGlobalRef(env, (jobject)eventCls);
+        eventCtor = (*env)->GetMethodID(env, eventCls, "<init>",
+            "(Leu/buney/kiche/KicheH3EventType;JLjava/util/List;)V");
+
+        eventTypeCls = (*env)->FindClass(env, "eu/buney/kiche/KicheH3EventType");
+        eventTypeCls = (jclass)(*env)->NewGlobalRef(env, (jobject)eventTypeCls);
+        fromValueMethod = (*env)->GetStaticMethodID(env, eventTypeCls, "fromValue",
+            "(I)Leu/buney/kiche/KicheH3EventType;");
+    }
+
+    jobject eventTypeObj = (*env)->CallStaticObjectMethod(env, eventTypeCls,
+        fromValueMethod, (jint)eventTypeValue);
+    if (!eventTypeObj) return NULL;
+
+    return (*env)->NewObject(env, eventCls, eventCtor,
+        eventTypeObj, (jlong)streamId, headerList);
+}
+
 // Throw a KicheH3Exception for an H3 error code by calling KicheH3Exception.check().
 // After this call, a Java exception is pending — the caller must return immediately.
 void throw_kiche_h3_exception(JNIEnv *env, int code) {

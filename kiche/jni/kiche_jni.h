@@ -14,6 +14,7 @@ void extract_sockaddr(const struct sockaddr_storage *ss, uint8_t *out_ip, int *o
 jobject make_kiche_address(JNIEnv *env, const uint8_t *ip, int ip_len, int port);
 jobject make_send_result(JNIEnv *env, int written, const quiche_send_info *si);
 void throw_kiche_exception(JNIEnv *env, int code);
+jobject make_h3_event(JNIEnv *env, int eventTypeValue, int64_t streamId, jobject headerList);
 void throw_kiche_h3_exception(JNIEnv *env, int code);
 socklen_t fill_sockaddr_from_address(JNIEnv *env, struct sockaddr_storage *ss, jbyteArray ip, jint port);
 

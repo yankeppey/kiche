@@ -18,15 +18,8 @@ actual class KicheH3Connection actual constructor(
         return h
     }
 
-    actual fun poll(quicConn: KicheConnection): KicheH3Event? {
-        // Returns [streamId, eventType] or null if DONE
-        val result = nativePoll(requireOpen(), quicConn.getHandle()) ?: return null
-        val streamId = result[0]
-        val eventType = KicheH3EventType.fromValue(result[1].toInt()) ?: return null
-        // Headers are collected by nativePoll into lastHeaders field
-        val headers = if (eventType == KicheH3EventType.Headers) lastHeaders else null
-        return KicheH3Event(eventType, streamId, headers)
-    }
+    actual fun poll(quicConn: KicheConnection): KicheH3Event? =
+        nativePoll(requireOpen(), quicConn.getHandle())
 
     actual fun sendRequest(
         quicConn: KicheConnection,
@@ -71,10 +64,7 @@ actual class KicheH3Connection actual constructor(
     actual fun extendedConnectEnabledByPeer(): Boolean =
         nativeExtendedConnectEnabledByPeer(requireOpen())
 
-    actual fun stats(): KicheH3Stats {
-        val s = nativeStats(requireOpen())
-        return KicheH3Stats(s[0], s[1])
-    }
+    actual fun stats(): KicheH3Stats = nativeStats(requireOpen())
 
     actual override fun close() {
         val h = handle
@@ -84,12 +74,9 @@ actual class KicheH3Connection actual constructor(
         }
     }
 
-    // Field written by JNI during poll() for header events
-    @JvmField internal var lastHeaders: List<KicheH3Header>? = null
-
     private external fun nativeNew(quicConnHandle: Long, configHandle: Long): Long
     private external fun nativeFree(handle: Long)
-    private external fun nativePoll(handle: Long, quicConnHandle: Long): LongArray?
+    private external fun nativePoll(handle: Long, quicConnHandle: Long): KicheH3Event?
     private external fun nativeSendRequest(handle: Long, quicConnHandle: Long,
         names: Array<ByteArray>, values: Array<ByteArray>, fin: Boolean): Long
     private external fun nativeSendBody(handle: Long, quicConnHandle: Long,
@@ -101,5 +88,5 @@ actual class KicheH3Connection actual constructor(
     private external fun nativeExtendedConnectEnabledByPeer(handle: Long): Boolean
     private external fun nativeSendResponse(handle: Long, quicConnHandle: Long,
         streamId: Long, names: Array<ByteArray>, values: Array<ByteArray>, fin: Boolean): Int
-    private external fun nativeStats(handle: Long): LongArray
+    private external fun nativeStats(handle: Long): KicheH3Stats
 }

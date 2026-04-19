@@ -76,9 +76,23 @@ static int header_collect_cb(uint8_t *name, size_t name_len,
     return 0;
 }
 
-JNIEXPORT jlongArray JNICALL
+// Returns a KicheH3Event Java object, or NULL if DONE.
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheH3Connection, nativePoll)(JNIEnv *env, jobject self,
         jlong handle, jlong quicConn) {
+    static jclass listCls = NULL, headerCls = NULL;
+    static jmethodID listCtor = NULL, listAdd = NULL, headerCtor = NULL;
+    if (!listCls) {
+        listCls = (*env)->FindClass(env, "java/util/ArrayList");
+        listCls = (jclass)(*env)->NewGlobalRef(env, (jobject)listCls);
+        listCtor = (*env)->GetMethodID(env, listCls, "<init>", "()V");
+        listAdd = (*env)->GetMethodID(env, listCls, "add", "(Ljava/lang/Object;)Z");
+
+        headerCls = (*env)->FindClass(env, "eu/buney/kiche/KicheH3Header");
+        headerCls = (jclass)(*env)->NewGlobalRef(env, (jobject)headerCls);
+        headerCtor = (*env)->GetMethodID(env, headerCls, "<init>", "([B[B)V");
+    }
+
     quiche_h3_event *ev = NULL;
     int64_t stream_id = quiche_h3_conn_poll(H3(handle), CONN(quicConn), &ev);
 
@@ -87,42 +101,23 @@ JNI_FN(PKG, KicheH3Connection, nativePoll)(JNIEnv *env, jobject self,
 
     int event_type = (int)quiche_h3_event_type(ev);
 
-    // If headers event, collect headers eagerly
+    // Collect headers eagerly for Headers events
+    jobject headerList = NULL;
     if (event_type == QUICHE_H3_EVENT_HEADERS) {
-        // Create ArrayList
-        jclass listCls = (*env)->FindClass(env, "java/util/ArrayList");
-        jmethodID listCtor = (*env)->GetMethodID(env, listCls, "<init>", "()V");
-        jmethodID listAdd = (*env)->GetMethodID(env, listCls, "add", "(Ljava/lang/Object;)Z");
-        jobject list = (*env)->NewObject(env, listCls, listCtor);
-
-        jclass headerCls = (*env)->FindClass(env, "eu/buney/kiche/KicheH3Header");
-        jmethodID headerCtor = (*env)->GetMethodID(env, headerCls, "<init>", "([B[B)V");
-
+        headerList = (*env)->NewObject(env, listCls, listCtor);
         header_cb_ctx ctx = {
             .env = env,
-            .list = list,
+            .list = headerList,
             .addMethod = listAdd,
             .headerClass = headerCls,
             .headerCtor = headerCtor,
         };
-
         quiche_h3_event_for_each_header(ev, header_collect_cb, &ctx);
-
-        // Store in lastHeaders field
-        static jfieldID fHeaders = NULL;
-        if (!fHeaders) {
-            jclass connCls = (*env)->GetObjectClass(env, self);
-            fHeaders = (*env)->GetFieldID(env, connCls, "lastHeaders", "Ljava/util/List;");
-        }
-        (*env)->SetObjectField(env, self, fHeaders, list);
     }
 
     quiche_h3_event_free(ev);
 
-    jlongArray result = (*env)->NewLongArray(env, 2);
-    jlong vals[2] = { stream_id, event_type };
-    (*env)->SetLongArrayRegion(env, result, 0, 2, vals);
-    return result;
+    return make_h3_event(env, event_type, stream_id, headerList);
 }
 
 JNIEXPORT jlong JNICALL
@@ -238,15 +233,18 @@ JNI_FN(PKG, KicheH3Connection, nativeExtendedConnectEnabledByPeer)(JNIEnv *env, 
     return quiche_h3_extended_connect_enabled_by_peer(H3(handle));
 }
 
-JNIEXPORT jlongArray JNICALL
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheH3Connection, nativeStats)(JNIEnv *env, jobject self, jlong handle) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheH3Stats");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(JJ)V");
+    }
     quiche_h3_stats stats;
     quiche_h3_conn_stats(H3(handle), &stats);
-    jlongArray result = (*env)->NewLongArray(env, 2);
-    jlong vals[2] = {
+    return (*env)->NewObject(env, cls, ctor,
         (jlong)stats.qpack_encoder_stream_recv_bytes,
-        (jlong)stats.qpack_decoder_stream_recv_bytes,
-    };
-    (*env)->SetLongArrayRegion(env, result, 0, 2, vals);
-    return result;
+        (jlong)stats.qpack_decoder_stream_recv_bytes);
 }

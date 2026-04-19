@@ -9,6 +9,7 @@ enum class KicheH3EventType(val value: Int) {
     PriorityUpdate(5);
 
     companion object {
+        @JvmStatic
         fun fromValue(value: Int): KicheH3EventType? = entries.find { it.value == value }
     }
 }
