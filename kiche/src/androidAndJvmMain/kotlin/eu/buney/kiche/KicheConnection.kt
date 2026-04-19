@@ -1,9 +1,6 @@
 package eu.buney.kiche
 
 actual class KicheConnection private constructor(private var handle: Long) : AutoCloseable {
-    // Field written by JNI for error outputs
-    @JvmField internal var lastErrorReason: ByteArray? = null
-
     // Fields written by JNI for pathStats() address data
     @JvmField internal var lastPathStatsLocalIp: ByteArray? = null
     @JvmField internal var lastPathStatsPeerIp: ByteArray? = null
@@ -264,15 +261,11 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     actual fun traceId(): ByteArray? = nativeTraceId(requireOpen())
     actual fun serverName(): ByteArray? = nativeServerName(requireOpen())
 
-    actual fun peerError(): KicheConnectionError? {
-        val arr = nativePeerError(requireOpen()) ?: return null
-        return KicheConnectionError(arr[0] != 0L, arr[1], lastErrorReason ?: ByteArray(0))
-    }
+    actual fun peerError(): KicheConnectionError? =
+        nativePeerError(requireOpen())
 
-    actual fun localError(): KicheConnectionError? {
-        val arr = nativeLocalError(requireOpen()) ?: return null
-        return KicheConnectionError(arr[0] != 0L, arr[1], lastErrorReason ?: ByteArray(0))
-    }
+    actual fun localError(): KicheConnectionError? =
+        nativeLocalError(requireOpen())
 
     actual fun stats(): KicheStats {
         val s = nativeStats(requireOpen())
@@ -360,8 +353,8 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativePeerCert(handle: Long): ByteArray?
     private external fun nativeSourceId(handle: Long): ByteArray?
     private external fun nativeDestinationId(handle: Long): ByteArray?
-    private external fun nativePeerError(handle: Long): LongArray?
-    private external fun nativeLocalError(handle: Long): LongArray?
+    private external fun nativePeerError(handle: Long): KicheConnectionError?
+    private external fun nativeLocalError(handle: Long): KicheConnectionError?
     private external fun nativeStats(handle: Long): LongArray
     private external fun nativePeerTransportParams(handle: Long): LongArray?
     private external fun nativeSendAckEliciting(handle: Long): Long

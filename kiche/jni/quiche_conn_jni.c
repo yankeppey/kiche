@@ -517,9 +517,23 @@ JNI_FN(PKG, KicheConnection, nativeDestinationId)(JNIEnv *env, jobject self, jlo
 
 // --- Peer/Local error ---
 
-// Returns [isApp, errorCode, reasonLen] or null if no error.
-// Reason bytes stored in field.
-JNIEXPORT jlongArray JNICALL
+static jobject make_connection_error(JNIEnv *env, bool is_app, uint64_t error_code,
+                                     const uint8_t *reason, size_t reason_len) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheConnectionError");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(ZJ[B)V");
+    }
+    jbyteArray reasonArr = (*env)->NewByteArray(env, (jsize)reason_len);
+    if (reason_len > 0) {
+        (*env)->SetByteArrayRegion(env, reasonArr, 0, (jsize)reason_len, (const jbyte *)reason);
+    }
+    return (*env)->NewObject(env, cls, ctor, (jboolean)is_app, (jlong)error_code, reasonArr);
+}
+
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativePeerError)(JNIEnv *env, jobject self, jlong handle) {
     bool is_app;
     uint64_t error_code;
@@ -528,24 +542,10 @@ JNI_FN(PKG, KicheConnection, nativePeerError)(JNIEnv *env, jobject self, jlong h
     if (!quiche_conn_peer_error(CONN(handle), &is_app, &error_code, &reason, &reason_len)) {
         return NULL;
     }
-    jlongArray result = (*env)->NewLongArray(env, 3);
-    jlong vals[3] = { is_app ? 1 : 0, (jlong)error_code, (jlong)reason_len };
-    (*env)->SetLongArrayRegion(env, result, 0, 3, vals);
-
-    if (reason_len > 0) {
-        static jfieldID fReason = NULL;
-        if (!fReason) {
-            jclass cls = (*env)->GetObjectClass(env, self);
-            fReason = (*env)->GetFieldID(env, cls, "lastErrorReason", "[B");
-        }
-        jbyteArray reasonArr = (*env)->NewByteArray(env, (jsize)reason_len);
-        (*env)->SetByteArrayRegion(env, reasonArr, 0, (jsize)reason_len, (const jbyte *)reason);
-        (*env)->SetObjectField(env, self, fReason, reasonArr);
-    }
-    return result;
+    return make_connection_error(env, is_app, error_code, reason, reason_len);
 }
 
-JNIEXPORT jlongArray JNICALL
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativeLocalError)(JNIEnv *env, jobject self, jlong handle) {
     bool is_app;
     uint64_t error_code;
@@ -554,21 +554,7 @@ JNI_FN(PKG, KicheConnection, nativeLocalError)(JNIEnv *env, jobject self, jlong 
     if (!quiche_conn_local_error(CONN(handle), &is_app, &error_code, &reason, &reason_len)) {
         return NULL;
     }
-    jlongArray result = (*env)->NewLongArray(env, 3);
-    jlong vals[3] = { is_app ? 1 : 0, (jlong)error_code, (jlong)reason_len };
-    (*env)->SetLongArrayRegion(env, result, 0, 3, vals);
-
-    if (reason_len > 0) {
-        static jfieldID fReason = NULL;
-        if (!fReason) {
-            jclass cls = (*env)->GetObjectClass(env, self);
-            fReason = (*env)->GetFieldID(env, cls, "lastErrorReason", "[B");
-        }
-        jbyteArray reasonArr = (*env)->NewByteArray(env, (jsize)reason_len);
-        (*env)->SetByteArrayRegion(env, reasonArr, 0, (jsize)reason_len, (const jbyte *)reason);
-        (*env)->SetObjectField(env, self, fReason, reasonArr);
-    }
-    return result;
+    return make_connection_error(env, is_app, error_code, reason, reason_len);
 }
 
 // --- Stats ---
