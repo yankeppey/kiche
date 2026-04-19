@@ -1,10 +1,6 @@
 package eu.buney.kiche
 
 actual class KicheConnection private constructor(private var handle: Long) : AutoCloseable {
-    // Fields written by JNI for pathStats() address data
-    @JvmField internal var lastPathStatsLocalIp: ByteArray? = null
-    @JvmField internal var lastPathStatsPeerIp: ByteArray? = null
-
     init {
         KicheLoader.load()
     }
@@ -267,37 +263,13 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     actual fun localError(): KicheConnectionError? =
         nativeLocalError(requireOpen())
 
-    actual fun stats(): KicheStats {
-        val s = nativeStats(requireOpen())
-        return KicheStats(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9],
-            s[10], s[11], s[12], s[13], s[14], s[15], s[16])
-    }
+    actual fun stats(): KicheStats = nativeStats(requireOpen())
 
-    actual fun peerTransportParams(): KicheTransportParams? {
-        val tp = nativePeerTransportParams(requireOpen()) ?: return null
-        return KicheTransportParams(tp[0], tp[1], tp[2], tp[3], tp[4], tp[5], tp[6], tp[7],
-            tp[8], tp[9], tp[10] != 0L, tp[11], tp[12])
-    }
+    actual fun peerTransportParams(): KicheTransportParams? =
+        nativePeerTransportParams(requireOpen())
 
-    actual fun pathStats(idx: Long): KichePathStats? {
-        val data = nativePathStats(requireOpen(), idx) ?: return null
-        // data layout: [active, recv, sent, lost, retrans, rtt, minRtt, rttvar, cwnd,
-        //               sentBytes, recvBytes, lostBytes, streamRetransBytes, pmtu, deliveryRate,
-        //               fromIpLen, fromPort, toIpLen, toPort]
-        val fromIpLen = data[15].toInt()
-        val fromPort = data[16].toInt()
-        val toIpLen = data[17].toInt()
-        val toPort = data[18].toInt()
-        return KichePathStats(
-            localAddr = KicheAddress(lastPathStatsLocalIp!!, fromPort),
-            peerAddr = KicheAddress(lastPathStatsPeerIp!!, toPort),
-            active = data[0] != 0L,
-            recv = data[1], sent = data[2], lost = data[3], retrans = data[4],
-            rtt = data[5], minRtt = data[6], rttvar = data[7], cwnd = data[8],
-            sentBytes = data[9], recvBytes = data[10], lostBytes = data[11],
-            streamRetransBytes = data[12], pmtu = data[13], deliveryRate = data[14],
-        )
-    }
+    actual fun pathStats(idx: Long): KichePathStats? =
+        nativePathStats(requireOpen(), idx)
 
     actual override fun close() {
         val h = handle
@@ -355,8 +327,8 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativeDestinationId(handle: Long): ByteArray?
     private external fun nativePeerError(handle: Long): KicheConnectionError?
     private external fun nativeLocalError(handle: Long): KicheConnectionError?
-    private external fun nativeStats(handle: Long): LongArray
-    private external fun nativePeerTransportParams(handle: Long): LongArray?
+    private external fun nativeStats(handle: Long): KicheStats
+    private external fun nativePeerTransportParams(handle: Long): KicheTransportParams?
     private external fun nativeSendAckEliciting(handle: Long): Long
     private external fun nativeStreamPriority(handle: Long, streamId: Long, urgency: Int, incremental: Boolean): Int
     private external fun nativeDgramRecvFrontLen(handle: Long): Long
@@ -375,7 +347,7 @@ actual class KicheConnection private constructor(private var handle: Long) : Aut
     private external fun nativeSetKeylogPath(handle: Long, path: String): Boolean
     private external fun nativeTraceId(handle: Long): ByteArray?
     private external fun nativeServerName(handle: Long): ByteArray?
-    private external fun nativePathStats(handle: Long, idx: Long): LongArray?
+    private external fun nativePathStats(handle: Long, idx: Long): KichePathStats?
     private external fun nativeProbePath(handle: Long, localIp: ByteArray, localPort: Int, peerIp: ByteArray, peerPort: Int): Long
     private external fun nativeIsPathValidated(handle: Long, localIp: ByteArray, localPort: Int, peerIp: ByteArray, peerPort: Int): Int
     private external fun nativeMigrateSource(handle: Long, localIp: ByteArray, localPort: Int): Long

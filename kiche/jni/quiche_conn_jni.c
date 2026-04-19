@@ -559,97 +559,85 @@ JNI_FN(PKG, KicheConnection, nativeLocalError)(JNIEnv *env, jobject self, jlong 
 
 // --- Stats ---
 
-JNIEXPORT jlongArray JNICALL
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativeStats)(JNIEnv *env, jobject self, jlong handle) {
-    quiche_stats stats;
-    quiche_conn_stats(CONN(handle), &stats);
-    // Pack 17 fields into a long array
-    jlongArray result = (*env)->NewLongArray(env, 17);
-    jlong vals[17] = {
-        (jlong)stats.recv, (jlong)stats.sent, (jlong)stats.lost,
-        (jlong)stats.spurious_lost, (jlong)stats.retrans,
-        (jlong)stats.sent_bytes, (jlong)stats.recv_bytes,
-        (jlong)stats.acked_bytes, (jlong)stats.lost_bytes,
-        (jlong)stats.stream_retrans_bytes,
-        (jlong)stats.dgram_recv, (jlong)stats.dgram_sent,
-        (jlong)stats.paths_count,
-        (jlong)stats.reset_stream_count_local, (jlong)stats.stopped_stream_count_local,
-        (jlong)stats.reset_stream_count_remote, (jlong)stats.stopped_stream_count_remote,
-    };
-    (*env)->SetLongArrayRegion(env, result, 0, 17, vals);
-    return result;
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheStats");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(JJJJJJJJJJJJJJJJJ)V");
+    }
+    quiche_stats s;
+    quiche_conn_stats(CONN(handle), &s);
+    return (*env)->NewObject(env, cls, ctor,
+        (jlong)s.recv, (jlong)s.sent, (jlong)s.lost, (jlong)s.spurious_lost, (jlong)s.retrans,
+        (jlong)s.sent_bytes, (jlong)s.recv_bytes, (jlong)s.acked_bytes, (jlong)s.lost_bytes,
+        (jlong)s.stream_retrans_bytes,
+        (jlong)s.dgram_recv, (jlong)s.dgram_sent, (jlong)s.paths_count,
+        (jlong)s.reset_stream_count_local, (jlong)s.stopped_stream_count_local,
+        (jlong)s.reset_stream_count_remote, (jlong)s.stopped_stream_count_remote);
 }
 
 // --- Path stats ---
 
-JNIEXPORT jlongArray JNICALL
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativePathStats)(JNIEnv *env, jobject self, jlong handle, jlong idx) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KichePathStats");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>",
+            "(Leu/buney/kiche/KicheAddress;Leu/buney/kiche/KicheAddress;"
+            "ZJJJJJJJJJJJJJJ)V");
+    }
     quiche_path_stats ps;
     int rc = quiche_conn_path_stats(CONN(handle), (size_t)idx, &ps);
     if (rc != 0) return NULL;
 
-    uint8_t local_ip[16], peer_ip[16];
-    int local_ip_len, peer_ip_len, local_port, peer_port;
-    extract_sockaddr(&ps.local_addr, local_ip, &local_ip_len, &local_port);
-    extract_sockaddr(&ps.peer_addr, peer_ip, &peer_ip_len, &peer_port);
+    uint8_t ip_buf[16]; int ip_len, port;
+    extract_sockaddr(&ps.local_addr, ip_buf, &ip_len, &port);
+    jobject localAddr = make_kiche_address(env, ip_buf, ip_len, port);
+    extract_sockaddr(&ps.peer_addr, ip_buf, &ip_len, &port);
+    jobject peerAddr = make_kiche_address(env, ip_buf, ip_len, port);
 
-    // Store address IPs in fields
-    static jfieldID fLocalIp = NULL, fPeerIp = NULL;
-    if (!fLocalIp) {
-        jclass cls = (*env)->GetObjectClass(env, self);
-        fLocalIp = (*env)->GetFieldID(env, cls, "lastPathStatsLocalIp", "[B");
-        fPeerIp = (*env)->GetFieldID(env, cls, "lastPathStatsPeerIp", "[B");
-    }
-    jbyteArray localIpArr = (*env)->NewByteArray(env, local_ip_len);
-    (*env)->SetByteArrayRegion(env, localIpArr, 0, local_ip_len, (const jbyte *)local_ip);
-    (*env)->SetObjectField(env, self, fLocalIp, localIpArr);
-
-    jbyteArray peerIpArr = (*env)->NewByteArray(env, peer_ip_len);
-    (*env)->SetByteArrayRegion(env, peerIpArr, 0, peer_ip_len, (const jbyte *)peer_ip);
-    (*env)->SetObjectField(env, self, fPeerIp, peerIpArr);
-
-    // Pack: [active, recv, sent, lost, retrans, rtt, minRtt, rttvar, cwnd,
-    //        sentBytes, recvBytes, lostBytes, streamRetransBytes, pmtu, deliveryRate,
-    //        localIpLen, localPort, peerIpLen, peerPort]
-    jlongArray result = (*env)->NewLongArray(env, 19);
-    jlong vals[19] = {
-        ps.active ? 1L : 0L,
+    jobject result = (*env)->NewObject(env, cls, ctor,
+        localAddr, peerAddr, (jboolean)ps.active,
         (jlong)ps.recv, (jlong)ps.sent, (jlong)ps.lost, (jlong)ps.retrans,
         (jlong)ps.rtt, (jlong)ps.min_rtt, (jlong)ps.rttvar, (jlong)ps.cwnd,
         (jlong)ps.sent_bytes, (jlong)ps.recv_bytes, (jlong)ps.lost_bytes,
-        (jlong)ps.stream_retrans_bytes, (jlong)ps.pmtu, (jlong)ps.delivery_rate,
-        (jlong)local_ip_len, (jlong)local_port, (jlong)peer_ip_len, (jlong)peer_port,
-    };
-    (*env)->SetLongArrayRegion(env, result, 0, 19, vals);
+        (jlong)ps.stream_retrans_bytes, (jlong)ps.pmtu, (jlong)ps.delivery_rate);
+    (*env)->DeleteLocalRef(env, localAddr);
+    (*env)->DeleteLocalRef(env, peerAddr);
     return result;
 }
 
 // --- Transport params ---
 
-JNIEXPORT jlongArray JNICALL
+JNIEXPORT jobject JNICALL
 JNI_FN(PKG, KicheConnection, nativePeerTransportParams)(JNIEnv *env, jobject self, jlong handle) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (!cls) {
+        cls = (*env)->FindClass(env, "eu/buney/kiche/KicheTransportParams");
+        cls = (jclass)(*env)->NewGlobalRef(env, (jobject)cls);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(JJJJJJJJJJZJJ)V");
+    }
     quiche_transport_params tp;
     if (!quiche_conn_peer_transport_params(CONN(handle), &tp)) {
         return NULL;
     }
-    jlongArray result = (*env)->NewLongArray(env, 13);
-    jlong vals[13] = {
-        (jlong)tp.peer_max_idle_timeout,
-        (jlong)tp.peer_max_udp_payload_size,
+    return (*env)->NewObject(env, cls, ctor,
+        (jlong)tp.peer_max_idle_timeout, (jlong)tp.peer_max_udp_payload_size,
         (jlong)tp.peer_initial_max_data,
         (jlong)tp.peer_initial_max_stream_data_bidi_local,
         (jlong)tp.peer_initial_max_stream_data_bidi_remote,
         (jlong)tp.peer_initial_max_stream_data_uni,
-        (jlong)tp.peer_initial_max_streams_bidi,
-        (jlong)tp.peer_initial_max_streams_uni,
-        (jlong)tp.peer_ack_delay_exponent,
-        (jlong)tp.peer_max_ack_delay,
-        tp.peer_disable_active_migration ? 1L : 0L,
-        (jlong)tp.peer_active_conn_id_limit,
-        (jlong)tp.peer_max_datagram_frame_size,
-    };
-    (*env)->SetLongArrayRegion(env, result, 0, 13, vals);
-    return result;
+        (jlong)tp.peer_initial_max_streams_bidi, (jlong)tp.peer_initial_max_streams_uni,
+        (jlong)tp.peer_ack_delay_exponent, (jlong)tp.peer_max_ack_delay,
+        (jboolean)tp.peer_disable_active_migration,
+        (jlong)tp.peer_active_conn_id_limit, (jlong)tp.peer_max_datagram_frame_size);
 }
 
 // --- Path migration & multi-path ---
