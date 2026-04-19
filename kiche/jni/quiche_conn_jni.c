@@ -696,19 +696,20 @@ JNI_FN(PKG, KicheConnection, nativePathEventNext)(JNIEnv *env, jobject self, jlo
     // Cached class/ctor IDs for the 5 simple event subclasses (local, peer) and ReusedSourceConnectionId
     static jclass clsNew = NULL, clsValidated = NULL, clsFailedValidation = NULL,
                   clsClosed = NULL, clsPeerMigrated = NULL, clsReused = NULL;
-    static jmethodID ctorSimple = NULL, ctorReused = NULL;
+    static jmethodID ctorNew = NULL, ctorValidated = NULL, ctorFailedValidation = NULL,
+                     ctorClosed = NULL, ctorPeerMigrated = NULL, ctorReused = NULL;
     if (!clsNew) {
         const char *simpleCtorSig = "(Leu/buney/kiche/KicheAddress;Leu/buney/kiche/KicheAddress;)V";
-        #define CACHE_SIMPLE(var, name) \
-            var = (*env)->FindClass(env, "eu/buney/kiche/KichePathEvent$" name); \
-            var = (jclass)(*env)->NewGlobalRef(env, (jobject)var);
-        CACHE_SIMPLE(clsNew, "New")
-        CACHE_SIMPLE(clsValidated, "Validated")
-        CACHE_SIMPLE(clsFailedValidation, "FailedValidation")
-        CACHE_SIMPLE(clsClosed, "Closed")
-        CACHE_SIMPLE(clsPeerMigrated, "PeerMigrated")
+        #define CACHE_SIMPLE(clsVar, ctorVar, name) \
+            clsVar = (*env)->FindClass(env, "eu/buney/kiche/KichePathEvent$" name); \
+            clsVar = (jclass)(*env)->NewGlobalRef(env, (jobject)clsVar); \
+            ctorVar = (*env)->GetMethodID(env, clsVar, "<init>", simpleCtorSig);
+        CACHE_SIMPLE(clsNew, ctorNew, "New")
+        CACHE_SIMPLE(clsValidated, ctorValidated, "Validated")
+        CACHE_SIMPLE(clsFailedValidation, ctorFailedValidation, "FailedValidation")
+        CACHE_SIMPLE(clsClosed, ctorClosed, "Closed")
+        CACHE_SIMPLE(clsPeerMigrated, ctorPeerMigrated, "PeerMigrated")
         #undef CACHE_SIMPLE
-        ctorSimple = (*env)->GetMethodID(env, clsNew, "<init>", simpleCtorSig);
 
         clsReused = (*env)->FindClass(env, "eu/buney/kiche/KichePathEvent$ReusedSourceConnectionId");
         clsReused = (jclass)(*env)->NewGlobalRef(env, (jobject)clsReused);
@@ -749,23 +750,24 @@ JNI_FN(PKG, KicheConnection, nativePathEventNext)(JNIEnv *env, jobject self, jlo
         struct sockaddr_storage local_ss, peer_ss;
         socklen_t local_len, peer_len;
         jclass eventCls;
+        jmethodID eventCtor;
 
         switch (type) {
             case QUICHE_PATH_EVENT_NEW:
                 quiche_path_event_new(ev, &local_ss, &local_len, &peer_ss, &peer_len);
-                eventCls = clsNew; break;
+                eventCls = clsNew; eventCtor = ctorNew; break;
             case QUICHE_PATH_EVENT_VALIDATED:
                 quiche_path_event_validated(ev, &local_ss, &local_len, &peer_ss, &peer_len);
-                eventCls = clsValidated; break;
+                eventCls = clsValidated; eventCtor = ctorValidated; break;
             case QUICHE_PATH_EVENT_FAILED_VALIDATION:
                 quiche_path_event_failed_validation(ev, &local_ss, &local_len, &peer_ss, &peer_len);
-                eventCls = clsFailedValidation; break;
+                eventCls = clsFailedValidation; eventCtor = ctorFailedValidation; break;
             case QUICHE_PATH_EVENT_CLOSED:
                 quiche_path_event_closed(ev, &local_ss, &local_len, &peer_ss, &peer_len);
-                eventCls = clsClosed; break;
+                eventCls = clsClosed; eventCtor = ctorClosed; break;
             case QUICHE_PATH_EVENT_PEER_MIGRATED:
                 quiche_path_event_peer_migrated(ev, &local_ss, &local_len, &peer_ss, &peer_len);
-                eventCls = clsPeerMigrated; break;
+                eventCls = clsPeerMigrated; eventCtor = ctorPeerMigrated; break;
             default:
                 quiche_path_event_free(ev);
                 return NULL;
@@ -777,7 +779,7 @@ JNI_FN(PKG, KicheConnection, nativePathEventNext)(JNIEnv *env, jobject self, jlo
         extract_sockaddr(&peer_ss, ip_buf, &ip_len, &port);
         jobject peer = make_kiche_address(env, ip_buf, ip_len, port);
 
-        result = (*env)->NewObject(env, eventCls, ctorSimple, local, peer);
+        result = (*env)->NewObject(env, eventCls, eventCtor, local, peer);
         (*env)->DeleteLocalRef(env, local);
         (*env)->DeleteLocalRef(env, peer);
     }
