@@ -2,11 +2,11 @@ package eu.buney.kiche.ktor.server.webtransport
 
 import eu.buney.kiche.*
 import eu.buney.kiche.ktor.webtransport.*
-import eu.buney.kiche.ktor.server.kicheLogStamp
 import eu.buney.kiche.QuicVarint
 import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
 import io.ktor.server.application.*
+import io.ktor.util.logging.KtorSimpleLogger
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -18,9 +18,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.CoroutineContext
 
-private fun slog(msg: String) {
-    println("[WT-SRV ${kicheLogStamp()}] $msg")
-}
+private val LOG = KtorSimpleLogger("eu.buney.kiche.ktor.server.webtransport.KicheWebTransportServerSession")
+private fun slog(msg: String) = LOG.trace(msg)
 
 /**
  * Server-side WebTransport session implementation.

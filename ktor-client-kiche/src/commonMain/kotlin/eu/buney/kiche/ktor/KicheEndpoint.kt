@@ -8,6 +8,7 @@ import io.ktor.http.content.*
 import io.ktor.network.sockets.*
 import io.ktor.util.*
 import io.ktor.util.date.*
+import io.ktor.util.logging.KtorSimpleLogger
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -16,9 +17,8 @@ import kotlinx.io.*
 import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 
-private fun log(msg: String) {
-    println("[KICHE ${kicheLogStamp()}] $msg")
-}
+private val LOG = KtorSimpleLogger("eu.buney.kiche.ktor.KicheEndpoint")
+private fun log(msg: String) = LOG.trace(msg)
 
 /**
  * Manages a single QUIC + HTTP/3 connection to a specific host:port.

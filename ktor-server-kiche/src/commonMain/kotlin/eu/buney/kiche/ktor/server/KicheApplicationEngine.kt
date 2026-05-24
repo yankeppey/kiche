@@ -7,6 +7,7 @@ import io.ktor.network.selector.*
 import io.ktor.network.sockets.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
+import io.ktor.util.logging.KtorSimpleLogger
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
@@ -14,9 +15,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.io.*
 import kotlin.random.Random
 
-private fun slog(msg: String) {
-    println("[KICHE-SRV ${kicheLogStamp()}] $msg")
-}
+private val LOG = KtorSimpleLogger("eu.buney.kiche.ktor.server.KicheApplicationEngine")
+private fun slog(msg: String) = LOG.trace(msg)
 
 /**
  * Ktor server engine that serves HTTP/3 over QUIC using Cloudflare quiche.

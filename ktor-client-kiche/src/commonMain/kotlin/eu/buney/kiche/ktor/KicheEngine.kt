@@ -9,13 +9,13 @@ import io.ktor.network.selector.*
 import io.ktor.util.*
 import io.ktor.util.collections.*
 import io.ktor.util.date.*
+import io.ktor.util.logging.KtorSimpleLogger
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlin.coroutines.CoroutineContext
 
-private fun log(msg: String) {
-    println("[KICHE ${kicheLogStamp()}] $msg")
-}
+private val LOG = KtorSimpleLogger("eu.buney.kiche.ktor.KicheEngine")
+private fun log(msg: String) = LOG.trace(msg)
 
 /**
  * Ktor HTTP client engine backed by Cloudflare quiche (QUIC + HTTP/3).

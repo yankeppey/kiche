@@ -1,9 +1,9 @@
 package eu.buney.kiche.ktor.webtransport
 
 import eu.buney.kiche.*
-import eu.buney.kiche.ktor.kicheLogStamp
 import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
+import io.ktor.util.logging.KtorSimpleLogger
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlin.coroutines.cancellation.CancellationException
@@ -15,9 +15,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.io.*
 import kotlin.coroutines.CoroutineContext
 
-private fun log(msg: String) {
-    println("[WT ${kicheLogStamp()}] $msg")
-}
+private val LOG = KtorSimpleLogger("eu.buney.kiche.ktor.webtransport.KicheWebTransportSession")
+private fun log(msg: String) = LOG.trace(msg)
 
 /**
  * Implementation of [WebTransportSession] backed by a dedicated QUIC + H3 connection.
