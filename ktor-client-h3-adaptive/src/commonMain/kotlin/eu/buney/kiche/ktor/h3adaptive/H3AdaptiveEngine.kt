@@ -17,8 +17,16 @@ import kotlinx.coroutines.sync.withLock
  * will use the QUIC engine. If QUIC fails, the engine falls back to TCP with
  * exponential backoff before retrying QUIC.
  *
- * When an origin is already known to support H3, requests can optionally race
- * QUIC against TCP (with a configurable head start for QUIC) to minimize latency.
+ * Selection is **sticky**, not raced: each request picks a single engine from the
+ * remembered [OriginState] and only falls back to TCP after a QUIC attempt fails. It
+ * does not race QUIC against TCP in parallel and take the winner. A future enhancement
+ * could, modelled on curl's connection-level Happy Eyeballs between h3 and h2/h1 (its
+ * HTTPS-connect filter starts the second transport after a soft/hard timeout of
+ * `happy_eyeballs_timeout/2` and `happy_eyeballs_timeout`):
+ * https://github.com/curl/curl/blob/master/lib/cf-https-connect.c — but racing here
+ * would have to be restricted to idempotent methods, since the ktor engine API exposes
+ * no connect-vs-request seam, so a raced non-idempotent request could reach the server
+ * twice.
  */
 public class H3AdaptiveEngine(
     override val config: H3AdaptiveEngineConfig,
