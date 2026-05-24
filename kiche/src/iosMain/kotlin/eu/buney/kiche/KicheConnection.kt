@@ -329,6 +329,9 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                             quiche_path_event_closed(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
                         QUICHE_PATH_EVENT_PEER_MIGRATED ->
                             quiche_path_event_peer_migrated(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        // `type` commonizes to an expect enum in the metadata compile, where a
+                        // `when` over it is never exhaustive without an else branch.
+                        else -> {}
                     }
                     val local = extractSockaddr(localSs.ptr)
                     val peer = extractSockaddr(peerSs.ptr)
@@ -338,6 +341,7 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                         QUICHE_PATH_EVENT_FAILED_VALIDATION -> KichePathEvent.FailedValidation(local, peer)
                         QUICHE_PATH_EVENT_CLOSED -> KichePathEvent.Closed(local, peer)
                         QUICHE_PATH_EVENT_PEER_MIGRATED -> KichePathEvent.PeerMigrated(local, peer)
+                        else -> null
                     }
                 }
             }

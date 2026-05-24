@@ -44,14 +44,12 @@ kotlin {
 
     val iosTargets = listOf(
         iosArm64(),
-        iosX64(),
         iosSimulatorArm64(),
     )
     jvm()
 
     listOf(
         iosArm64(),
-        iosX64(),
         iosSimulatorArm64()
     ).forEach {
         it.binaries.framework {

@@ -34,7 +34,7 @@ jobs:
         with:
           targets: >-
             aarch64-apple-darwin,x86_64-apple-darwin,
-            aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim,
+            aarch64-apple-ios,aarch64-apple-ios-sim,
             aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Cache cargo
@@ -56,10 +56,14 @@ jobs:
       - name: JVM tests
         run: ./gradlew jvmTest -Pci.skip.native.build --no-configuration-cache
 
-      - name: Compile iOS targets
+      # The metadata (klib) compile of the shared iosMain source set is what
+      # `publishToMavenCentral` builds — it catches errors the per-target iOS
+      # compiles miss (e.g. non-exhaustive `when` over commonized expect enums).
+      - name: Compile iOS targets + Kotlin metadata
         run: >-
           ./gradlew
-          compileKotlinIosArm64 compileKotlinIosSimulatorArm64 compileKotlinIosX64
+          compileKotlinIosArm64 compileKotlinIosSimulatorArm64
+          compileIosMainKotlinMetadata
           -Pci.skip.native.build --no-configuration-cache
 
       - name: Compile Android (release AAR)

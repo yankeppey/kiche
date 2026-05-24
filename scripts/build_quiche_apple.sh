@@ -23,7 +23,6 @@ TARGETS=(
   "aarch64-apple-darwin macosx arm64"
   "x86_64-apple-darwin macosx x86_64"
   "aarch64-apple-ios iphoneos arm64"
-  "x86_64-apple-ios iphone x86_64"
   "aarch64-apple-ios-sim iphone arm64"
 )
 
