@@ -150,10 +150,13 @@ internal class KicheEndpoint(
             ?: error("Failed to resolve address for $host")
         val peerAddr = KicheAddress(ip = peerIp, port = port)
 
-        // Bind local UDP socket — use the peer's host so both sides share
-        // the same address family (avoids IPv4↔IPv6 dual-stack issues on macOS).
-        log("ensureConnected: binding UDP socket")
-        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(host, 0))
+        // Bind the local UDP socket to the wildcard address of the peer's family, so both
+        // ends share the same address family (avoids IPv4↔IPv6 dual-stack issues on macOS).
+        // Binding to `host` (the peer) only works when the peer is local — e.g. 127.0.0.1 in
+        // tests; a remote host fails with EADDRNOTAVAIL ("Can't assign requested address").
+        val bindHost = if (peerIp.size == 16) "::" else "0.0.0.0"
+        log("ensureConnected: binding UDP socket ($bindHost)")
+        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(bindHost, 0))
         val localSocketAddr = socket.localAddress as InetSocketAddress
         val localAddr = KicheAddress(
             ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
@@ -543,7 +546,9 @@ internal class KicheEndpoint(
             ?: error("Failed to resolve address for $host")
         val peerAddr = KicheAddress(ip = peerIp, port = port)
 
-        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(host, 0))
+        // Wildcard local bind of the peer's family (see ensureConnected for why not `host`).
+        val bindHost = if (peerIp.size == 16) "::" else "0.0.0.0"
+        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(bindHost, 0))
         val localSocketAddr = socket.localAddress as InetSocketAddress
         val localAddr = KicheAddress(
             ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
