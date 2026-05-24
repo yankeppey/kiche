@@ -17,4 +17,7 @@ captures
 !*.xcworkspace/contents.xcworkspacedata
 **/xcshareddata/WorkspaceSettings.xcsettings
 .env.development
-docs/
+
+# JVM crash dumps from test runs
+hs_err_pid*.log
+replay_pid*.log

@@ -118,10 +118,22 @@ Flow:
 > (e.g., in-memory sessions, rate-limit counters) is not shared between the two.
 > Externalize such state (Redis, database) if you need it consistent across both stacks.
 
+## What works
+
+- **Multiple concurrent QUIC connections** -- connections are tracked in a DCID-keyed map with a
+  configurable `maxConnections` limit; includes version negotiation and stateless retry tokens.
+- **Concurrent request handling** -- each H3 request stream is dispatched to the Ktor pipeline on
+  its own coroutine, so requests within a connection run concurrently.
+- **WebTransport server** -- `Routing.webTransport(path) { session -> ... }` accepts WebTransport
+  sessions over HTTP/3 (Extended CONNECT) with streams and datagrams.
+
 ## Current limitations
 
-- **JVM only** (Android and iOS support planned)
-- **Single connection** -- handles one QUIC client at a time (sufficient for testing and development)
-- **No concurrent streams** -- requests within a connection are processed sequentially
-- **No WebSocket / SSE** -- HTTP/3 request-response only
-- **Response bodies buffered in memory** -- no streaming response channel yet
+- **JVM is the tested target.** Android and iOS targets are declared in `build.gradle.kts` and the
+  code compiles, but they are not yet integration-tested.
+- **Response bodies buffered in memory** -- the response body is serialized to a `ByteArray` before
+  H3 transmission; there is no streaming response channel yet.
+- **No WebSocket / SSE** -- plain HTTP/3 request-response (plus WebTransport, above).
+- **No HTTP/3 priority or trailers** (those quiche APIs are not wrapped — see `docs/quiche-coverage.md`).
+- Subject to known flaky concurrency issues during handshake under load (see
+  `docs/connection-pooling-bugs-report.md`).

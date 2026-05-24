@@ -46,13 +46,24 @@ println(response.bodyAsText())
 | `initialMaxStreamsBidi` | `100` | Max concurrent bidirectional streams |
 | `initialMaxStreamsUni` | `100` | Max concurrent unidirectional streams |
 
+## What works
+
+- **Connection pooling** -- one long-lived QUIC connection per `host:port`; requests are
+  multiplexed as independent HTTP/3 streams (see `KicheEndpoint`).
+- **Streaming request bodies** -- `ReadChannelContent` / `WriteChannelContent` are streamed
+  to the server chunk-by-chunk alongside QUIC flow control (tested up to 8 MB).
+- **WebTransport client** -- `HttpClient.webTransportSession(url)` opens a WebTransport session
+  over HTTP/3 (bidirectional/unidirectional streams + datagrams).
+
 ## Current limitations
 
-- **JVM only** (Android and iOS support planned)
-- **No connection pooling** -- opens a new QUIC connection per request
-- **ByteArray bodies only** -- `ReadChannelContent` / `WriteChannelContent` streaming not yet supported
-- **No redirect handling** at the engine level (use Ktor's `HttpRedirect` plugin)
-- **No system trust store** -- `caCertPath` must be set explicitly for TLS verification
+- **JVM is the tested target.** Android and iOS targets are declared in `build.gradle.kts` and the
+  code compiles, but they are not yet integration-tested.
+- **Response bodies are buffered in memory** before being exposed as a `ByteReadChannel`
+  (the body is reassembled from H3 `Data` events, then handed to Ktor).
+- **No redirect handling** at the engine level (use Ktor's `HttpRedirect` plugin).
+- **No system trust store** -- `caCertPath` must be set explicitly for TLS verification.
+- **No HTTP/3 priority** (quiche's priority API is not wrapped — see `docs/quiche-coverage.md`).
 
 ## How it works
 
