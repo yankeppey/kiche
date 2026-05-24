@@ -178,6 +178,18 @@ tasks.named<Jar>("jvmJar") {
         include("x86_64/libquiche_jni.dylib")
         into("native/macos")
     }
+
+    // Linux/Windows desktop natives can't be built on macOS, so CI builds them
+    // on native runners and points us at the collected directory. Its layout
+    // mirrors the JAR's: <dir>/{linux,windows}/<arch>/libquiche_jni.{so,dll},
+    // which KicheLoader resolves at runtime under /native/{os}/{arch}/.
+    (project.findProperty("kiche.desktopNativesDir") as String?)?.let { dir ->
+        from(dir) {
+            include("linux/**/libquiche_jni.so")
+            include("windows/**/libquiche_jni.dll")
+            into("native")
+        }
+    }
 }
 
 // Configure JVM tests to find native libraries

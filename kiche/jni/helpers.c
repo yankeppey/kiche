@@ -1,7 +1,12 @@
 #include "kiche_jni.h"
 #include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#endif
 
 // Fill a sockaddr from ip bytes + port.
 // ip must be 4 bytes (IPv4) or 16 bytes (IPv6).

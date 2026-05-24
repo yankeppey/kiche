@@ -174,15 +174,22 @@ fun main() {
 
 ## Building from source
 
-quiche (Rust + BoringSSL) is vendored as a git submodule, so clone recursively:
+quiche (Rust + BoringSSL) is vendored as a git submodule, pinned to quiche **`0.28.0`**, so clone
+recursively:
 
 ```
 git clone --recurse-submodules https://github.com/yankeppey/kiche.git
 ./gradlew :example:shared:run        # runs the desktop demo on macOS
 ```
 
-Native build scripts for Android, Apple (iOS/macOS), and the desktop JNI library are under
-[`scripts/`](scripts/), orchestrated by Gradle tasks.
+Native build scripts are under [`scripts/`](scripts/), orchestrated by Gradle tasks:
+
+- `build_quiche_apple.sh` / `build_quiche_jni.sh` — Apple (iOS/macOS) + the macOS desktop JNI.
+- `build_quiche_android.sh` — Android ABIs via `cargo-ndk` (needs `ANDROID_NDK_HOME`).
+- `build_quiche_jni_linux.sh` / `build_quiche_jni_windows.ps1` — the Linux/Windows desktop JNI
+  (`libquiche_jni.so` / `.dll`). These run natively on a Linux / Windows host; CI builds them on
+  GitHub-hosted runners and the published JVM jar bundles every platform's native under
+  `native/<os>/<arch>/`, extracted at runtime by `KicheLoader`.
 
 ## License
 

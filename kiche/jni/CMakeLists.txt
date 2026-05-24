@@ -12,11 +12,25 @@ set(JNI_SOURCES
 
 add_library(quiche_jni SHARED ${JNI_SOURCES})
 
-# Include JNI headers
-if (NOT ANDROID)
+# Include JNI headers. JNI symbols are resolved by the host JVM at load time, so
+# we only ever need the headers — never the jvm import library.
+if (ANDROID)
+    # The NDK already puts jni.h on the default include path.
+elseif (WIN32)
+    # Don't use find_package(JNI) here: CMake 3.31's FindJNI throws a
+    # "Syntax error in cmake code ... foreach" from JAVA_APPEND_LIBRARY_DIRECTORIES
+    # on the GitHub windows runner. Pull the headers straight from JAVA_HOME.
+    if (NOT DEFINED JAVA_HOME OR JAVA_HOME STREQUAL "")
+        set(JAVA_HOME "$ENV{JAVA_HOME}")
+    endif ()
+    file(TO_CMAKE_PATH "${JAVA_HOME}" JAVA_HOME)
+    target_include_directories(quiche_jni PRIVATE
+        "${JAVA_HOME}/include"
+        "${JAVA_HOME}/include/win32")
+else ()
     find_package(JNI COMPONENTS JVM REQUIRED)
+    target_include_directories(quiche_jni PRIVATE ${JNI_INCLUDE_DIRS})
 endif ()
-target_include_directories(quiche_jni PRIVATE ${JNI_INCLUDE_DIRS})
 
 # Include quiche headers
 if(NOT DEFINED QUICHE_INCLUDE_DIR)
@@ -46,8 +60,16 @@ else ()
     set_target_properties(quiche PROPERTIES IMPORTED_LOCATION "${QUICHE_LIB_PATH}")
 
     if (WIN32)
-        target_link_libraries(quiche_jni PRIVATE ${JNI_LIBRARIES} quiche m)
+        # MSVC omits the "lib" prefix on DLLs; force it so the artifact is
+        # libquiche_jni.dll — the exact name KicheLoader.load() looks up.
+        set_target_properties(quiche_jni PROPERTIES PREFIX "lib")
+        # quiche + its vendored BoringSSL pull in these Win32 system libraries.
+        # (No libm on MSVC, and JNI symbols are resolved by the host JVM at load
+        # time, so we don't link the jvm import library here.)
+        target_link_libraries(quiche_jni PRIVATE quiche
+            ws2_32 userenv ntdll bcrypt crypt32 advapi32)
     else()
+        # macOS and Linux both link libm.
         target_link_libraries(quiche_jni PRIVATE quiche m)
     endif()
 endif()

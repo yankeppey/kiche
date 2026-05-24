@@ -1,0 +1,81 @@
+# Build + test on every push to main and on pull requests. No publishing —
+# releases are tag-triggered (see release.yml). The macOS job runs the JVM tests
+# and compiles the Android and iOS targets; the desktop-natives job proves the
+# Linux/Windows JNI still builds.
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust + cross targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            aarch64-apple-darwin,x86_64-apple-darwin,
+            aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim,
+            aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/quiche
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Install Android NDK
+        run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724"
+
+      - name: Build macOS quiche + JNI
+        run: |
+          bash scripts/build_quiche_apple.sh
+          bash scripts/build_quiche_jni.sh
+
+      - name: JVM tests
+        run: ./gradlew jvmTest -Pci.skip.native.build --no-configuration-cache
+
+      - name: Compile iOS targets
+        run: >-
+          ./gradlew
+          compileKotlinIosArm64 compileKotlinIosSimulatorArm64 compileKotlinIosX64
+          -Pci.skip.native.build --no-configuration-cache
+
+      - name: Compile Android (release AAR)
+        run: ./gradlew :kiche:assembleRelease --no-configuration-cache
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-test-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  desktop-natives:
+    name: Desktop natives
+    uses: ./.github/workflows/desktop-natives.yml
