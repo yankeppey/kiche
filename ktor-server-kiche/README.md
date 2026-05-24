@@ -12,7 +12,7 @@ dependencies {
 }
 ```
 
-Create a server:
+Create a server. QUIC mandates TLS 1.3, so a certificate chain and private key are required:
 
 ```kotlin
 import eu.buney.kiche.ktor.server.KicheQuic
@@ -27,35 +27,47 @@ fun main() {
                 call.respondText("Hello over HTTP/3!")
             }
         }
+    }.apply {
+        engine.configuration.certChainPath = "/path/to/cert.pem"
+        engine.configuration.privateKeyPath = "/path/to/key.pem"
     }.start(wait = true)
 }
 ```
 
-TLS certificate and key are required (QUIC mandates TLS 1.3):
+More advanced configuration (every option, with its default):
 
 ```kotlin
+import eu.buney.kiche.KicheCcAlgorithm
+
 embeddedServer(KicheQuic, port = 4433) {
     routing { /* ... */ }
 }.apply {
-    engine.configuration.certChainPath = "/path/to/cert.pem"
-    engine.configuration.privateKeyPath = "/path/to/key.pem"
+    engine.configuration.apply {
+        // TLS (required)
+        certChainPath = "/path/to/cert.pem"
+        privateKeyPath = "/path/to/key.pem"
+
+        // Congestion control
+        ccAlgorithm = KicheCcAlgorithm.Bbr2            // Reno | Cubic | Bbr2
+
+        // Timeouts
+        maxIdleTimeoutMs = 30_000                      // idle timeout (ms); 0 = no timeout
+
+        // Flow control (bytes)
+        initialMaxData = 10_000_000                    // connection-level receive window
+        initialMaxStreamDataBidiLocal = 1_000_000      // per bidi stream, locally initiated
+        initialMaxStreamDataBidiRemote = 1_000_000     // per bidi stream, remotely initiated
+        initialMaxStreamDataUni = 1_000_000            // per unidirectional stream
+
+        // Concurrency
+        initialMaxStreamsBidi = 100                    // max concurrent bidirectional streams
+        initialMaxStreamsUni = 100                     // max concurrent unidirectional streams
+        maxConnections = 1000                          // max concurrent QUIC connections
+    }
 }.start(wait = true)
 ```
 
-## Configuration
-
-| Property | Default | Description |
-|---|---|---|
-| `certChainPath` | **required** | TLS certificate chain file (PEM) |
-| `privateKeyPath` | **required** | TLS private key file (PEM) |
-| `ccAlgorithm` | `Bbr2` | Congestion control: `Reno`, `Cubic`, or `Bbr2` |
-| `maxIdleTimeoutMs` | `30000` | Connection idle timeout (ms). 0 = no timeout |
-| `initialMaxData` | `10000000` | Connection-level flow control window (bytes) |
-| `initialMaxStreamDataBidiLocal` | `1000000` | Per-stream flow control (bidirectional, local-initiated) |
-| `initialMaxStreamDataBidiRemote` | `1000000` | Per-stream flow control (bidirectional, remote-initiated) |
-| `initialMaxStreamDataUni` | `1000000` | Per-stream flow control (unidirectional) |
-| `initialMaxStreamsBidi` | `100` | Max concurrent bidirectional streams |
-| `initialMaxStreamsUni` | `100` | Max concurrent unidirectional streams |
+WebTransport sessions are accepted with `routing { webTransport(path) { … } }` (Extended CONNECT).
 
 ## Architecture
 
@@ -70,69 +82,16 @@ For each H3 request, the engine creates a `KicheApplicationCall` and executes th
 
 ## Dual-stack HTTP/2 + HTTP/3
 
-In production, clients discover HTTP/3 via the `Alt-Svc` header served over HTTP/2.
-Run both a standard HTTP/2 engine and KicheQuic side by side, sharing the same application module:
+QUIC is reached over UDP, which browsers won't try first — clients discover HTTP/3 from the
+**`Alt-Svc`** header on a regular HTTP/2 (TCP) response, then switch to QUIC for later requests
+([RFC 7838](https://www.rfc-editor.org/rfc/rfc7838.html)). So in production you run a TCP engine
+(Netty/CIO/…) that advertises `h3` next to `KicheQuic` on the same port:
 
 ```kotlin
-import eu.buney.kiche.ktor.server.KicheQuic
-import io.ktor.server.engine.*
-import io.ktor.server.netty.*          // or CIO, Jetty, etc.
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
-import io.ktor.server.plugins.defaultheaders.*
-
-/** Application logic — defined once, used by both engines. */
-fun Application.appModule() {
-    routing {
-        get("/") {
-            call.respondText("Hello from HTTP/2 or HTTP/3!")
-        }
-    }
-}
-
-fun main() {
-    // HTTP/2 (TCP, port 443) — advertises HTTP/3 via Alt-Svc
-    embeddedServer(Netty, port = 443) {
-        appModule()
-        install(DefaultHeaders) {
-            header("Alt-Svc", """h3=":443"; ma=86400""")
-        }
-    }.start(wait = false)
-
-    // HTTP/3 (QUIC/UDP, port 443)
-    embeddedServer(KicheQuic, port = 443) {
-        appModule()
-    }.apply {
-        engine.configuration.certChainPath = "/path/to/cert.pem"
-        engine.configuration.privateKeyPath = "/path/to/key.pem"
-    }.start(wait = true)
+install(DefaultHeaders) {
+    header("Alt-Svc", """h3=":443"; ma=86400""")   // advertise HTTP/3 on the HTTP/2 responses
 }
 ```
 
-Flow:
-1. Client connects over TCP → Netty serves the response with `Alt-Svc: h3=":443"; ma=86400`
-2. Client learns HTTP/3 is available and switches to QUIC on subsequent requests
-3. Both engines execute the same `appModule()` routing and handlers
-
-> **Note:** Each engine creates its own `Application` instance, so in-memory plugin state
-> (e.g., in-memory sessions, rate-limit counters) is not shared between the two.
-> Externalize such state (Redis, database) if you need it consistent across both stacks.
-
-## What works
-
-- **Multiple concurrent QUIC connections** -- connections are tracked in a DCID-keyed map with a
-  configurable `maxConnections` limit; includes version negotiation and stateless retry tokens.
-- **Concurrent request handling** -- each H3 request stream is dispatched to the Ktor pipeline on
-  its own coroutine, so requests within a connection run concurrently.
-- **WebTransport server** -- `Routing.webTransport(path) { session -> ... }` accepts WebTransport
-  sessions over HTTP/3 (Extended CONNECT) with streams and datagrams.
-
-## Current limitations
-
-- **JVM is the tested target.** Android and iOS targets are declared in `build.gradle.kts` and the
-  code compiles, but they are not yet integration-tested.
-- **Response bodies buffered in memory** -- the response body is serialized to a `ByteArray` before
-  H3 transmission; there is no streaming response channel yet.
-- **No WebSocket / SSE** -- plain HTTP/3 request-response (plus WebTransport, above).
-- **No HTTP/3 priority or trailers** (those quiche APIs are not wrapped — see `docs/quiche-coverage.md`).
-- Subject to known flaky concurrency issues during handshake under load.
+The client-side counterpart that reads `Alt-Svc` and routes between TCP and QUIC is
+[`ktor-client-h3-adaptive`](../ktor-client-h3-adaptive/README.md).

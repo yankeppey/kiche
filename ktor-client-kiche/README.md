@@ -12,7 +12,7 @@ dependencies {
 }
 ```
 
-Create a client:
+Create a client — the minimum is a CA bundle for TLS verification (quiche has no system trust store):
 
 ```kotlin
 import eu.buney.kiche.ktor.Kiche
@@ -22,51 +22,54 @@ import io.ktor.client.statement.*
 
 val client = HttpClient(Kiche) {
     engine {
-        verifyPeer = true
-        caCertPath = "/path/to/ca-cert.pem"
+        caCertPath = "/path/to/ca-cert.pem"   // PEM CA bundle, e.g. https://curl.se/ca/cacert.pem
+        // verifyPeer = false                 // DEMO ONLY — skips TLS verification; never ship this
     }
 }
 
 val response = client.get("https://example.com/api")
+println(response.version)        // HTTP/3.0
 println(response.bodyAsText())
 ```
 
-## Configuration
+More advanced configuration (every option, with its default):
 
-| Property | Default | Description |
-|---|---|---|
-| `verifyPeer` | `true` | Verify server TLS certificate |
-| `caCertPath` | `null` | Path to CA certificate file (PEM). Required when `verifyPeer = true` |
-| `ccAlgorithm` | `Bbr2` | Congestion control: `Reno`, `Cubic`, or `Bbr2` |
-| `maxIdleTimeoutMs` | `30000` | Connection idle timeout (ms). 0 = no timeout |
-| `initialMaxData` | `10000000` | Connection-level flow control window (bytes) |
-| `initialMaxStreamDataBidiLocal` | `1000000` | Per-stream flow control (bidirectional, local-initiated) |
-| `initialMaxStreamDataBidiRemote` | `1000000` | Per-stream flow control (bidirectional, remote-initiated) |
-| `initialMaxStreamDataUni` | `1000000` | Per-stream flow control (unidirectional) |
-| `initialMaxStreamsBidi` | `100` | Max concurrent bidirectional streams |
-| `initialMaxStreamsUni` | `100` | Max concurrent unidirectional streams |
+```kotlin
+import eu.buney.kiche.ktor.Kiche
+import eu.buney.kiche.KicheCcAlgorithm
 
-## What works
+val client = HttpClient(Kiche) {
+    engine {
+        // TLS
+        verifyPeer = true                              // verify the server certificate
+        caCertPath = "/path/to/ca-cert.pem"            // PEM CA bundle; required when verifyPeer = true
 
-- **Connection pooling** -- one long-lived QUIC connection per `host:port`; requests are
-  multiplexed as independent HTTP/3 streams (see `KicheEndpoint`).
-- **Streaming request bodies** -- `ReadChannelContent` / `WriteChannelContent` are streamed
-  to the server chunk-by-chunk alongside QUIC flow control (tested up to 8 MB).
-- **WebTransport client** -- `HttpClient.webTransportSession(url)` opens a WebTransport session
-  over HTTP/3 (bidirectional/unidirectional streams + datagrams).
+        // Congestion control
+        ccAlgorithm = KicheCcAlgorithm.Bbr2            // Reno | Cubic | Bbr2
 
-## Current limitations
+        // Timeouts
+        maxIdleTimeoutMs = 30_000                      // idle timeout (ms); 0 = no timeout
 
-- **JVM is the tested target.** Android and iOS targets are declared in `build.gradle.kts` and the
-  code compiles, but they are not yet integration-tested.
-- **Response bodies are buffered in memory** before being exposed as a `ByteReadChannel`
-  (the body is reassembled from H3 `Data` events, then handed to Ktor).
-- **No redirect handling** at the engine level (use Ktor's `HttpRedirect` plugin).
-- **No system trust store** -- `caCertPath` must be set explicitly for TLS verification.
-- **No HTTP/3 priority** (quiche's priority API is not wrapped — see `docs/quiche-coverage.md`).
+        // Flow control (bytes)
+        initialMaxData = 10_000_000                    // connection-level receive window
+        initialMaxStreamDataBidiLocal = 1_000_000      // per bidi stream, locally initiated
+        initialMaxStreamDataBidiRemote = 1_000_000     // per bidi stream, remotely initiated
+        initialMaxStreamDataUni = 1_000_000            // per unidirectional stream
+
+        // Concurrency
+        initialMaxStreamsBidi = 100                    // max concurrent bidirectional streams
+        initialMaxStreamsUni = 100                     // max concurrent unidirectional streams
+    }
+}
+```
+
+A WebTransport client is also available (`install(WebTransport)` + `client.webTransport(url) { … }`);
+see the root [README](../README.md#usage).
 
 ## How it works
 
-The engine creates a UDP `DatagramSocket`, performs the QUIC handshake via `KicheConnection.connect()`, opens an HTTP/3 session via `KicheH3Connection`, maps Ktor's `HttpRequestData` to H3 pseudo-headers, and polls for H3 response events. All I/O runs on `Dispatchers.IO`.
-
-Responses always report `HttpProtocolVersion("HTTP", 3, 0)`.
+The engine opens a UDP socket, performs the QUIC handshake via `KicheConnection.connect()`, runs an
+HTTP/3 session over `KicheH3Connection`, maps Ktor's `HttpRequestData` to H3 pseudo-headers, and
+polls for H3 response events on `Dispatchers.IO`. One long-lived QUIC connection is pooled per
+`host:port`, multiplexing requests as independent HTTP/3 streams. Responses report
+`HttpProtocolVersion("HTTP", 3, 0)`.
