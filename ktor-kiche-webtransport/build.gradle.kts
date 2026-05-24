@@ -6,7 +6,7 @@ plugins {
 
 kotlin {
     jvmToolchain(17)
-    androidLibrary {
+    android {
         namespace = "eu.buney.kiche.ktor.webtransport"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()

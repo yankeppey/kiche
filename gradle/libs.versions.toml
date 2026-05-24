@@ -1,15 +1,16 @@
 [versions]
-agp = "9.1.1"
+agp = "9.2.1"
 kiche = "0.1.0"
-kotlin = "2.3.20"
-ktor = "3.4.2"
-kotlinx-coroutines = "1.10.2"
-android-compileSdk = "36"
+kotlin = "2.3.21"
+ktor = "3.5.0"
+kotlinx-coroutines = "1.11.0"
+android-compileSdk = "37"
 android-minSdk = "26"
 android-targetSdk = "36"
 vanniktechMavenPublish = "0.36.0"
-compose = "1.10.3"
+compose = "1.11.0"
 androidx-activityCompose = "1.13.0"
+kermit = "2.1.0"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
@@ -20,8 +21,9 @@ ktor-server-test-host = { module = "io.ktor:ktor-server-test-host", version.ref 
 ktor-network = { module = "io.ktor:ktor-network", version.ref = "ktor" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
-slf4j-simple = { module = "org.slf4j:slf4j-simple", version = "2.0.16" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version = "2.0.18" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
+kermit = { module = "co.touchlab:kermit", version.ref = "kermit" }
 
 [plugins]
 androidLibrary = { id = "com.android.library", version.ref = "agp" }
