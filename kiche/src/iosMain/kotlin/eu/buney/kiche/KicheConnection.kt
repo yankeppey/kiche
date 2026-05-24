@@ -329,6 +329,7 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                             quiche_path_event_closed(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
                         QUICHE_PATH_EVENT_PEER_MIGRATED ->
                             quiche_path_event_peer_migrated(ev, localSs.ptr, localLen.ptr, peerSs.ptr, peerLen.ptr)
+                        else -> {}
                     }
                     val local = extractSockaddr(localSs.ptr)
                     val peer = extractSockaddr(peerSs.ptr)
@@ -338,6 +339,7 @@ actual class KicheConnection private constructor(internal var ptr: COpaquePointe
                         QUICHE_PATH_EVENT_FAILED_VALIDATION -> KichePathEvent.FailedValidation(local, peer)
                         QUICHE_PATH_EVENT_CLOSED -> KichePathEvent.Closed(local, peer)
                         QUICHE_PATH_EVENT_PEER_MIGRATED -> KichePathEvent.PeerMigrated(local, peer)
+                        else -> null
                     }
                 }
             }
