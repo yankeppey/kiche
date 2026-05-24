@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.vanniktechMavenPublish)
 }
 
 android {
@@ -88,5 +89,42 @@ tasks.named<Test>("jvmTest") {
         events("passed", "skipped", "failed", "standardOut", "standardError")
         showStandardStreams = true
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+group = "eu.buney.kiche"
+version = libs.versions.kiche.get()
+
+mavenPublishing {
+    publishToMavenCentral()
+
+    signAllPublications()
+
+    coordinates(group.toString(), "ktor-server-kiche", version.toString())
+
+    pom {
+        name = "Kiche Ktor Server"
+        description = "Ktor server engine serving HTTP/3 over QUIC, backed by Kiche"
+        inceptionYear = "2026"
+        url = "https://github.com/yankeppey/kiche"
+        licenses {
+            license {
+                name = "The Apache License, Version 2.0"
+                url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+            }
+        }
+        developers {
+            developer {
+                id = "yankeppey"
+                name = "Andrei Buneyeu"
+                email = "yankeppey@gmail.com"
+                url = "http://buney.eu"
+            }
+        }
+        scm {
+            url = "https://github.com/yankeppey/kiche/"
+            connection = "scm:git:git://github.com/yankeppey/kiche.git"
+            developerConnection = "scm:git:ssh://git@github.com/yankeppey/kiche.git"
+        }
     }
 }

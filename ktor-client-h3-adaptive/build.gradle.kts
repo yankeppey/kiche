@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.vanniktechMavenPublish)
 }
 
 android {
@@ -32,6 +33,43 @@ kotlin {
         }
         jvmTest.dependencies {
             implementation(libs.slf4j.simple)
+        }
+    }
+}
+
+group = "eu.buney.kiche"
+version = libs.versions.kiche.get()
+
+mavenPublishing {
+    publishToMavenCentral()
+
+    signAllPublications()
+
+    coordinates(group.toString(), "ktor-client-h3-adaptive", version.toString())
+
+    pom {
+        name = "Kiche Ktor Adaptive HTTP/3 Client"
+        description = "Alt-Svc-driven adaptive Ktor client engine routing between TCP and QUIC"
+        inceptionYear = "2026"
+        url = "https://github.com/yankeppey/kiche"
+        licenses {
+            license {
+                name = "The Apache License, Version 2.0"
+                url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+            }
+        }
+        developers {
+            developer {
+                id = "yankeppey"
+                name = "Andrei Buneyeu"
+                email = "yankeppey@gmail.com"
+                url = "http://buney.eu"
+            }
+        }
+        scm {
+            url = "https://github.com/yankeppey/kiche/"
+            connection = "scm:git:git://github.com/yankeppey/kiche.git"
+            developerConnection = "scm:git:ssh://git@github.com/yankeppey/kiche.git"
         }
     }
 }
