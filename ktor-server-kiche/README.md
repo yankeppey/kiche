@@ -135,5 +135,4 @@ Flow:
   H3 transmission; there is no streaming response channel yet.
 - **No WebSocket / SSE** -- plain HTTP/3 request-response (plus WebTransport, above).
 - **No HTTP/3 priority or trailers** (those quiche APIs are not wrapped — see `docs/quiche-coverage.md`).
-- Subject to known flaky concurrency issues during handshake under load (see
-  `docs/connection-pooling-bugs-report.md`).
+- Subject to known flaky concurrency issues during handshake under load.

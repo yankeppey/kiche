@@ -33,7 +33,7 @@ Kiche's connection pooling: the first request handshakes, later ones reuse the c
 ```
 
 **Android** requires the quiche JNI `.so` built for the device ABI via cargo-ndk (through `:kiche`).
-This path is not yet integration-tested (see `docs/release-readiness.md`). Once built:
+This path is not yet integration-tested. Once built:
 
 ```
 ./gradlew :example:androidApp:installDebug
@@ -51,8 +51,8 @@ first build also compiles quiche for iOS (slow once). Details in [`iosApp/README
 ## ⚠️ TLS verification is disabled
 
 The app sets `verifyPeer = false` in the Kiche engine **on purpose**, to avoid bundling a CA
-file. Kiche has no system trust store yet (see `docs/release-readiness.md` → "TLS trust"). This
-is fine for a demo against known servers — **never ship `verifyPeer = false` in a real app.** To
+file. Kiche has no system trust store yet, so real verification needs an explicit `caCertPath`.
+This is fine for a demo against known servers — **never ship `verifyPeer = false` in a real app.** To
 verify properly, bundle a CA bundle (e.g. https://curl.se/ca/cacert.pem) and set `caCertPath`.
 
 ## Notes / TODO

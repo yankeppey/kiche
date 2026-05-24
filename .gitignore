@@ -21,3 +21,7 @@ captures
 # JVM crash dumps from test runs
 hs_err_pid*.log
 replay_pid*.log
+
+# Local Claude Code working files — never committed
+CLAUDE.md
+.claude/

@@ -68,8 +68,8 @@ class Http3DemoViewModel {
     private val pureClient: HttpClient = HttpClient(Kiche) {
         engine {
             // DEMO ONLY: skip TLS verification so we don't have to bundle a CA bundle.
-            // quiche has no system trust store (see docs/release-readiness.md → "TLS trust").
-            // Never ship verifyPeer = false in a real app.
+            // quiche has no system trust store; real peer verification needs an explicit CA
+            // file via caCertPath. Never ship verifyPeer = false in a real app.
             verifyPeer = false
         }
         install(HttpTimeout) {
@@ -154,8 +154,8 @@ class Http3DemoViewModel {
      *
      * Reads the response body as a [io.ktor.utils.io.ByteReadChannel] line-by-line — the
      * idiomatic streaming-read pattern. NOTE: the current engine buffers the full body before
-     * exposing it (see docs/release-readiness.md), so lines are not yet delivered truly
-     * incrementally — only the API usage is streaming.
+     * exposing it, so lines are not yet delivered truly incrementally — only the API usage is
+     * streaming.
      */
     suspend fun runStreaming(lines: Int) {
         streaming = OpState.Loading
