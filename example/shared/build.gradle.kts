@@ -14,7 +14,7 @@ plugins {
 
 kotlin {
     jvmToolchain(17)
-    androidLibrary {
+    android {
         namespace = "eu.buney.kiche.example.shared"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
@@ -35,10 +35,14 @@ kotlin {
             implementation(project(":ktor-client-kiche"))
             implementation(libs.ktor.client.core)
             implementation(libs.kotlinx.coroutines.core)
+            implementation(libs.kermit)
         }
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
+                // Provide an SLF4J backend so ktor-network's internal logs surface on the
+                // console (otherwise "No SLF4J providers were found" → NOP, and they're swallowed).
+                implementation(libs.slf4j.simple)
             }
         }
     }

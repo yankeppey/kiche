@@ -4,6 +4,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import co.touchlab.kermit.Logger
 import eu.buney.kiche.ktor.Kiche
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
@@ -38,6 +39,15 @@ sealed interface OpState {
 @Stable
 class Http3DemoViewModel {
 
+    private val log = Logger.withTag("KicheDemo")
+
+    init {
+        // Turn on quiche's internal QUIC/HTTP3 trace logging (to stderr). Verbose, but useful
+        // for the demo. ktor-network's own logs surface via the slf4j-simple desktop dependency.
+        val enabled = eu.buney.kiche.Kiche.enableDebugLogging()
+        log.i { "quiche debug logging ${if (enabled) "enabled" else "already enabled"}" }
+    }
+
     val client: HttpClient = HttpClient(Kiche) {
         engine {
             // DEMO ONLY: skip TLS verification so we don't have to bundle a CA bundle.
@@ -63,7 +73,7 @@ class Http3DemoViewModel {
     /** GET /get — confirms the handshake worked and reports the negotiated protocol. */
     suspend fun loadConnectionInfo() {
         connectionInfo = OpState.Loading
-        connectionInfo = runOp {
+        connectionInfo = runOp("GET /get") {
             val response = client.get("${Endpoints.HTTPBIN}/get")
             buildString {
                 appendLine("Status:   ${response.status}")
@@ -77,7 +87,7 @@ class Http3DemoViewModel {
     /** POST /post — echoes the request body back inside the response JSON. */
     suspend fun runEcho(message: String) {
         echo = OpState.Loading
-        echo = runOp {
+        echo = runOp("POST /post") {
             val response = client.post("${Endpoints.HTTPBIN}/post") { setBody(message) }
             response.bodyAsText().take(1200)
         }
@@ -86,7 +96,7 @@ class Http3DemoViewModel {
     /** GET /bytes/{n} — downloads n random bytes (httpbin caps this at ~100 KB). */
     suspend fun runDownload(numBytes: Int) {
         download = OpState.Loading
-        download = runOp {
+        download = runOp("GET /bytes/$numBytes") {
             val mark = TimeSource.Monotonic.markNow()
             val bytes = client.get("${Endpoints.HTTPBIN}/bytes/$numBytes").readRawBytes()
             val elapsed = mark.elapsedNow()
@@ -104,7 +114,7 @@ class Http3DemoViewModel {
      */
     suspend fun runStreaming(lines: Int) {
         streaming = OpState.Loading
-        streaming = runOp {
+        streaming = runOp("GET /stream/$lines") {
             val channel = client.get("${Endpoints.HTTPBIN}/stream/$lines").bodyAsChannel()
             var count = 0
             val preview = StringBuilder()
@@ -123,12 +133,17 @@ class Http3DemoViewModel {
         client.close()
     }
 
-    private suspend fun runOp(block: suspend () -> String): OpState =
-        try {
-            OpState.Success(block())
+    private suspend fun runOp(name: String, block: suspend () -> String): OpState {
+        log.i { "$name — starting" }
+        return try {
+            val text = block()
+            log.i { "$name — ok" }
+            OpState.Success(text)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            log.e(e) { "$name — failed" }
             OpState.Failure(e.message ?: e.toString())
         }
+    }
 }
