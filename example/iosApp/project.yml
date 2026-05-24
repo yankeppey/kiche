@@ -19,6 +19,10 @@ settings:
     # The Gradle embed task writes the framework into the build dir, which Xcode's default
     # run-script sandbox forbids. KMP requires this to be disabled.
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # :example:shared targets iosSimulatorArm64 (Apple Silicon) but not iosX64, so build the
+    # simulator for arm64 only — otherwise a "generic iOS Simulator" build also requests x86_64
+    # and the framework-embed task fails with "Unknown iOS simulator arch: 'x86_64'".
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
 
 targets:
   iosApp:
