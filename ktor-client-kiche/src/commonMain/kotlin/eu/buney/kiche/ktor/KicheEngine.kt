@@ -14,9 +14,7 @@ import kotlinx.coroutines.*
 import kotlin.coroutines.CoroutineContext
 
 private fun log(msg: String) {
-    val t = System.currentTimeMillis() % 100_000
-    val thread = Thread.currentThread().name.takeLast(30)
-    println("[KICHE $t $thread] $msg")
+    println("[KICHE ${kicheLogStamp()}] $msg")
 }
 
 /**

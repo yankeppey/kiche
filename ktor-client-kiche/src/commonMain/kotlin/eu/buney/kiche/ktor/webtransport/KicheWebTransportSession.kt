@@ -1,6 +1,7 @@
 package eu.buney.kiche.ktor.webtransport
 
 import eu.buney.kiche.*
+import eu.buney.kiche.ktor.kicheLogStamp
 import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
 import io.ktor.utils.io.*
@@ -15,9 +16,7 @@ import kotlinx.io.*
 import kotlin.coroutines.CoroutineContext
 
 private fun log(msg: String) {
-    val t = System.currentTimeMillis() % 100_000
-    val thread = Thread.currentThread().name.takeLast(30)
-    println("[WT $t $thread] $msg")
+    println("[WT ${kicheLogStamp()}] $msg")
 }
 
 /**

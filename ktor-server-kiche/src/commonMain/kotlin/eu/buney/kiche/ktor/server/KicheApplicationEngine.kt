@@ -15,9 +15,7 @@ import kotlinx.io.*
 import kotlin.random.Random
 
 private fun slog(msg: String) {
-    val t = System.currentTimeMillis() % 100_000
-    val thread = Thread.currentThread().name.takeLast(30)
-    println("[KICHE-SRV $t $thread] $msg")
+    println("[KICHE-SRV ${kicheLogStamp()}] $msg")
 }
 
 /**

@@ -2,6 +2,7 @@ package eu.buney.kiche.ktor.server.webtransport
 
 import eu.buney.kiche.*
 import eu.buney.kiche.ktor.webtransport.*
+import eu.buney.kiche.ktor.server.kicheLogStamp
 import eu.buney.kiche.QuicVarint
 import eu.buney.kiche.ktor.webtransport.capsule.*
 import io.ktor.network.sockets.*
@@ -14,12 +15,11 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
 import kotlin.coroutines.CoroutineContext
 
 private fun slog(msg: String) {
-    val t = System.currentTimeMillis() % 100_000
-    val thread = Thread.currentThread().name.takeLast(30)
-    println("[WT-SRV $t $thread] $msg")
+    println("[WT-SRV ${kicheLogStamp()}] $msg")
 }
 
 /**

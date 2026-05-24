@@ -6,6 +6,7 @@ import eu.buney.kiche.KicheH3Exception
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlin.concurrent.Volatile
 import kotlin.coroutines.CoroutineContext
 
 /**
