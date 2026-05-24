@@ -1,21 +1,16 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.androidKmpLibrary)
     alias(libs.plugins.vanniktechMavenPublish)
-}
-
-android {
-    namespace = "eu.buney.kiche.ktor.server"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-
-    defaultConfig {
-        minSdk = libs.versions.android.minSdk.get().toInt()
-    }
 }
 
 kotlin {
     jvmToolchain(17)
-    androidTarget()
+    androidLibrary {
+        namespace = "eu.buney.kiche.ktor.server"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
     jvm()
     iosArm64()
     iosSimulatorArm64()
