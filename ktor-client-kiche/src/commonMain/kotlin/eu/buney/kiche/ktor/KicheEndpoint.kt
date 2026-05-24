@@ -142,10 +142,14 @@ internal class KicheEndpoint(
         // will close the native objects it captured at launch.
         detachConnectionLocked()
 
-        // Resolve peer address
-        val socketAddr = InetSocketAddress(host, port)
-        val peerIp = socketAddr.resolveAddress()
+        // Resolve peer address, preferring IPv4. ktor-network's resolveAddress() returns the first
+        // address the OS resolver yields — IPv6 first on Apple platforms — and the iOS Simulator
+        // can't route public IPv6, so the QUIC UDP send fails with EHOSTUNREACH. We also build the
+        // socket address from the resolved bytes so the actual send never re-resolves the hostname
+        // back to a different (unroutable) family.
+        val peerIp = resolveHostPreferIpv4(host)
             ?: error("Failed to resolve address for $host")
+        val socketAddr = InetSocketAddress(peerIp, port)
         val peerAddr = KicheAddress(ip = peerIp, port = port)
 
         // Bind the local UDP socket to the wildcard address of the peer's family, so both
@@ -539,9 +543,10 @@ internal class KicheEndpoint(
     suspend fun openWebTransportSession(url: Url): WebTransportSession {
         log("openWebTransportSession: $url")
 
-        val socketAddr = InetSocketAddress(host, port)
-        val peerIp = socketAddr.resolveAddress()
+        // Prefer IPv4 and pin the socket address to the resolved bytes (see ensureConnected).
+        val peerIp = resolveHostPreferIpv4(host)
             ?: error("Failed to resolve address for $host")
+        val socketAddr = InetSocketAddress(peerIp, port)
         val peerAddr = KicheAddress(ip = peerIp, port = port)
 
         // Wildcard local bind of the peer's family (see ensureConnected for why not `host`).
