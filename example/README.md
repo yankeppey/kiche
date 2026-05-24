@@ -4,6 +4,11 @@ A small **Compose Multiplatform** app (Android + Desktop/JVM) that demonstrates 
 `ktor-client-kiche` HTTP/3 client against public test servers. UX follows the Compose Multiplatform
 sample: a menu of buttons, each opening a feature screen.
 
+Two modules (the KMP plugin can't coexist with `com.android.application` in AGP 9):
+
+- **`:example:shared`** — KMP library with the shared Compose UI/ViewModel and the desktop app entry.
+- **`:example:androidApp`** — pure Android application that depends on `:example:shared`.
+
 ## Screens
 
 | Screen | What it does | Endpoint |
@@ -21,14 +26,14 @@ Kiche's connection pooling: the first request handshakes, later ones reuse the c
 **Desktop (works out of the box on macOS** — `:kiche` bundles a prebuilt `libquiche_jni.dylib`):
 
 ```
-./gradlew :example:run
+./gradlew :example:shared:run
 ```
 
 **Android** requires the quiche JNI `.so` built for the device ABI via cargo-ndk (through `:kiche`).
 This path is not yet integration-tested (see `docs/release-readiness.md`). Once built:
 
 ```
-./gradlew :example:installDebug
+./gradlew :example:androidApp:installDebug
 ```
 
 ## ⚠️ TLS verification is disabled

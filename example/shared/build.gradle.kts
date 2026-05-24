@@ -2,9 +2,22 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidApplication)
+    alias(libs.plugins.androidLibrary)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+}
+
+// KMP *library* with the shared Compose UI + the desktop app entry point.
+// The Android *application* lives in :example:androidApp — the kotlinMultiplatform plugin is
+// not compatible with com.android.application in AGP 9 (see maps commit 85c4e4e), so the app
+// is split out into its own pure-Android module that depends on this one.
+
+android {
+    namespace = "eu.buney.kiche.example.shared"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+    defaultConfig {
+        minSdk = libs.versions.android.minSdk.get().toInt()
+    }
 }
 
 kotlin {
@@ -27,31 +40,12 @@ kotlin {
             implementation(libs.ktor.client.core)
             implementation(libs.kotlinx.coroutines.core)
         }
-        androidMain.dependencies {
-            implementation(libs.androidx.activity.compose)
-        }
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
             }
         }
     }
-}
-
-android {
-    namespace = "eu.buney.kiche.example"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-
-    defaultConfig {
-        applicationId = "eu.buney.kiche.example"
-        minSdk = libs.versions.android.minSdk.get().toInt()
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 1
-        versionName = libs.versions.kiche.get()
-    }
-    // NOTE: running on Android requires the quiche JNI .so built for the device ABI
-    // (cargo-ndk, via :kiche). The desktop target runs out of the box on macOS, where
-    // :kiche bundles a prebuilt libquiche_jni.dylib.
 }
 
 compose.desktop {
