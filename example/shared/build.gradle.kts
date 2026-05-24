@@ -43,11 +43,20 @@ kotlin {
             implementation(compose.materialIconsExtended)
             implementation(compose.ui)
 
-            // The HTTP/3 client engine under test, plus the Ktor client API.
+            // The HTTP/3 client engine under test, the adaptive TCP↔QUIC engine, and the Ktor client API.
             implementation(project(":ktor-client-kiche"))
+            implementation(project(":ktor-client-h3-adaptive"))
             implementation(libs.ktor.client.core)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kermit)
+        }
+        androidMain.dependencies {
+            // TCP/HTTP-2 leg of the adaptive engine on Android.
+            implementation(libs.ktor.client.okhttp)
+        }
+        iosMain.dependencies {
+            // TCP/HTTP-2 leg of the adaptive engine on iOS (NSURLSession).
+            implementation(libs.ktor.client.darwin)
         }
         val desktopMain by getting {
             dependencies {
@@ -55,6 +64,8 @@ kotlin {
                 // Provide an SLF4J backend so ktor-network's internal logs surface on the
                 // console (otherwise "No SLF4J providers were found" → NOP, and they're swallowed).
                 implementation(libs.slf4j.simple)
+                // TCP/HTTP-2 leg of the adaptive engine on desktop JVM.
+                implementation(libs.ktor.client.okhttp)
             }
         }
     }

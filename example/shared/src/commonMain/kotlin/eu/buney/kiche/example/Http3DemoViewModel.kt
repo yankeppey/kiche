@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import co.touchlab.kermit.Logger
 import eu.buney.kiche.ktor.Kiche
+import eu.buney.kiche.ktor.h3adaptive.H3Adaptive
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
@@ -26,11 +27,22 @@ sealed interface OpState {
     data class Failure(val message: String) : OpState
 }
 
+/** The HTTP engine the demo operations run on, toggled from the menu. */
+enum class EngineMode(val label: String) {
+    /** Every request goes over QUIC/HTTP-3 (Kiche). */
+    PureHttp3("Pure HTTP/3"),
+
+    /** First request over TCP/HTTP-2, then upgraded to HTTP/3 once Alt-Svc advertises it. */
+    Adaptive("Adaptive HTTP/2 ⇄ HTTP/3"),
+}
+
 /**
- * Owns a single [HttpClient] backed by the Kiche HTTP/3 engine and drives the demo operations.
+ * Owns the [HttpClient]s that drive the demo operations and exposes an [EngineMode] toggle.
  *
- * One client is shared across every screen on purpose: it shows Kiche's connection pooling —
- * the first request to a host performs the QUIC handshake, later requests reuse the connection.
+ * Two clients are held: a pure HTTP/3 client (Kiche) and an adaptive one that starts on TCP/HTTP-2
+ * and upgrades to HTTP/3 via Alt-Svc. The menu switch picks which one the operations use. Each
+ * client is reused across every screen on purpose — it shows connection pooling: the first request
+ * to a host performs the handshake, later requests reuse the connection.
  *
  * State is exposed as Compose [mutableStateOf] (the Paragem `@Stable` state-holder idiom),
  * so screens read it directly without flows. This is a plain holder, not an androidx ViewModel,
@@ -48,7 +60,12 @@ class Http3DemoViewModel {
         log.i { "quiche debug logging ${if (enabled) "enabled" else "already enabled"}" }
     }
 
-    val client: HttpClient = HttpClient(Kiche) {
+    /** Which engine the demo operations run on; toggled from the menu. */
+    var engineMode by mutableStateOf(EngineMode.PureHttp3)
+        private set
+
+    // Pure HTTP/3: every request goes over QUIC (Kiche).
+    private val pureClient: HttpClient = HttpClient(Kiche) {
         engine {
             // DEMO ONLY: skip TLS verification so we don't have to bundle a CA bundle.
             // quiche has no system trust store (see docs/release-readiness.md → "TLS trust").
@@ -60,6 +77,27 @@ class Http3DemoViewModel {
             connectTimeoutMillis = 10_000
         }
     }
+
+    // Adaptive: first request over TCP/HTTP-2 (OkHttp on JVM/Android, Darwin on iOS), then upgraded
+    // to HTTP/3 (Kiche) once the origin's Alt-Svc advertises it (RFC 7838).
+    private val adaptiveClient: HttpClient = HttpClient(H3Adaptive) {
+        engine {
+            installTcpEngine()
+            quic(Kiche) {
+                verifyPeer = false // DEMO ONLY — see above. The TCP leg validates TLS normally.
+            }
+        }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 20_000
+            connectTimeoutMillis = 10_000
+        }
+    }
+
+    private val client: HttpClient
+        get() = when (engineMode) {
+            EngineMode.PureHttp3 -> pureClient
+            EngineMode.Adaptive -> adaptiveClient
+        }
 
     var connectionInfo by mutableStateOf<OpState>(OpState.Idle)
         private set
@@ -136,8 +174,19 @@ class Http3DemoViewModel {
         }
     }
 
+    /** Switch the active engine and clear stale results produced by the previous one. */
+    fun selectEngineMode(mode: EngineMode) {
+        if (mode == engineMode) return
+        engineMode = mode
+        connectionInfo = OpState.Idle
+        echo = OpState.Idle
+        download = OpState.Idle
+        streaming = OpState.Idle
+    }
+
     fun close() {
-        client.close()
+        pureClient.close()
+        adaptiveClient.close()
     }
 
     private suspend fun runOp(name: String, block: suspend () -> String): OpState {
