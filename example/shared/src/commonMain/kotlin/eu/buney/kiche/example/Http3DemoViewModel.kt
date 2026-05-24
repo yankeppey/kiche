@@ -93,12 +93,19 @@ class Http3DemoViewModel {
         }
     }
 
-    /** GET /bytes/{n} — downloads n random bytes (httpbin caps this at ~100 KB). */
+    /**
+     * GET /stream-bytes/{n} — downloads n random bytes, streamed in chunks.
+     *
+     * We use /stream-bytes rather than /bytes: nghttp2.org's /bytes endpoint is broken — it sends
+     * the response headers (200, Content-Length) but then aborts the body (an empty body over
+     * HTTP/2, or RESET_STREAM with H3_INTERNAL_ERROR=0x102 over HTTP/3). /stream-bytes returns the
+     * same n random bytes and works correctly.
+     */
     suspend fun runDownload(numBytes: Int) {
         download = OpState.Loading
-        download = runOp("GET /bytes/$numBytes") {
+        download = runOp("GET /stream-bytes/$numBytes") {
             val mark = TimeSource.Monotonic.markNow()
-            val bytes = client.get("${Endpoints.HTTPBIN}/bytes/$numBytes").readRawBytes()
+            val bytes = client.get("${Endpoints.HTTPBIN}/stream-bytes/$numBytes").readRawBytes()
             val elapsed = mark.elapsedNow()
             "Requested: $numBytes bytes\nReceived:  ${bytes.size} bytes\nElapsed:   $elapsed"
         }

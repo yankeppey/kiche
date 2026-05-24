@@ -23,7 +23,7 @@ fun DownloadScreen(vm: Http3DemoViewModel, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     Column(modifier = modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
-            "GET /bytes/{n} downloads n random bytes (httpbin caps n at ~100 KB).",
+            "GET /stream-bytes/{n} downloads n random bytes, streamed in chunks.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
