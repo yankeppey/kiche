@@ -1,0 +1,8 @@
+# The Xcode project is generated from project.yml by `xcodegen generate` — never commit it.
+iosApp.xcodeproj/
+
+# Xcode build / user artifacts
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
