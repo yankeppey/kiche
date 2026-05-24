@@ -20,9 +20,9 @@ actual object Kiche {
     actual fun headerInfo(buf: ByteArray, len: Int, dcil: Int): KicheHeaderInfo = memScoped {
         val version = alloc<UIntVar>()
         val type = alloc<UByteVar>()
-        val scid = ByteArray(QUICHE_MAX_CONN_ID_LEN.toInt())
+        val scid = ByteArray(QUICHE_MAX_CONN_ID_LEN)
         val scidLen = alloc<ULongVar> { value = scid.size.toULong() }
-        val dcid = ByteArray(QUICHE_MAX_CONN_ID_LEN.toInt())
+        val dcid = ByteArray(QUICHE_MAX_CONN_ID_LEN)
         val dcidLen = alloc<ULongVar> { value = dcid.size.toULong() }
         val token = ByteArray(512)
         val tokenLen = alloc<ULongVar> { value = token.size.toULong() }
