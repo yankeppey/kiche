@@ -142,105 +142,121 @@ internal class KicheEndpoint(
         // will close the native objects it captured at launch.
         detachConnectionLocked()
 
-        // Resolve peer address, preferring IPv4. ktor-network's resolveAddress() returns the first
-        // address the OS resolver yields — IPv6 first on Apple platforms — and the iOS Simulator
-        // can't route public IPv6, so the QUIC UDP send fails with EHOSTUNREACH. We also build the
-        // socket address from the resolved bytes so the actual send never re-resolves the hostname
-        // back to a different (unroutable) family.
-        val peerIp = resolveHostPreferIpv4(host)
-            ?: error("Failed to resolve address for $host")
-        val socketAddr = InetSocketAddress(peerIp, port)
-        val peerAddr = KicheAddress(ip = peerIp, port = port)
+        // Resolve every address for the host and try the QUIC handshake to each in turn, falling
+        // back to the next on failure. This is a sequential subset of Happy Eyeballs (RFC 8305,
+        // https://www.rfc-editor.org/rfc/rfc8305): we keep the OS resolver's order (IPv6-first per
+        // RFC 6724) and bake in NO IP-family preference — preferring IPv4 would be wrong for a
+        // general client (Apple requires IPv6-only support) — yet an unroutable family still fails
+        // over instead of hanging. quiche (like its reference client) connects to a single address
+        // with no fallback, and ktor-network's resolveAddress() exposes only the first address;
+        // QUIC's "connect" is the handshake we drive here, so this layer is where the fallback
+        // belongs — the same place ktor's tcpConnect does it for TCP.
+        //
+        // TODO: upgrade to full Happy Eyeballs v2 — race the attempts in parallel with a ~250ms
+        // delay instead of sequentially, so a slow-but-routable first address can't delay a working
+        // one. Reference implementation: curl's HTTPS-connect filter, which Happy-Eyeballs between
+        // QUIC/h3 and TCP — https://github.com/curl/curl/blob/master/lib/cf-https-connect.c (see
+        // also https://daniel.haxx.se/blog/2025/08/04/even-happier-eyeballs/ and the IETF HAPPY WG's
+        // Happy-Eyeballs-v3 work generalising the algorithm to QUIC).
+        val addresses = resolveHostAddresses(host)
+        if (addresses.isEmpty()) error("Failed to resolve address for $host")
 
-        // Bind the local UDP socket to the wildcard address of the peer's family, so both
-        // ends share the same address family (avoids IPv4↔IPv6 dual-stack issues on macOS).
-        // Binding to `host` (the peer) only works when the peer is local — e.g. 127.0.0.1 in
-        // tests; a remote host fails with EADDRNOTAVAIL ("Can't assign requested address").
-        val bindHost = if (peerIp.size == 16) "::" else "0.0.0.0"
-        log("ensureConnected: binding UDP socket ($bindHost)")
-        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(bindHost, 0))
-        val localSocketAddr = socket.localAddress as InetSocketAddress
-        val localAddr = KicheAddress(
-            ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
-            port = localSocketAddr.port,
-        )
-
-        val scid = Random.nextBytes(16)
         val handshakeBuf = ByteArray(MAX_DATAGRAM_SIZE)
+        var lastError: Throwable? = null
 
-        val qConfig = KicheConfig().apply {
-            setApplicationProtos(H3_ALPN)
-            verifyPeer(config.verifyPeer)
-            config.caCertPath?.let { loadVerifyLocationsFromFile(it) }
-            setCcAlgorithm(config.ccAlgorithm)
-            setMaxIdleTimeout(config.maxIdleTimeoutMs)
-            setInitialMaxData(config.initialMaxData)
-            setInitialMaxStreamDataBidiLocal(config.initialMaxStreamDataBidiLocal)
-            setInitialMaxStreamDataBidiRemote(config.initialMaxStreamDataBidiRemote)
-            setInitialMaxStreamDataUni(config.initialMaxStreamDataUni)
-            setInitialMaxStreamsBidi(config.initialMaxStreamsBidi)
-            setInitialMaxStreamsUni(config.initialMaxStreamsUni)
-        }
+        for ((index, peerIp) in addresses.withIndex()) {
+            val family = if (peerIp.size == 16) "IPv6" else "IPv4"
+            // Pin the socket address to the resolved bytes so the UDP send never re-resolves the
+            // hostname to a different family. Bind the local socket to that family's wildcard —
+            // binding to the peer host fails with EADDRNOTAVAIL for any non-local server.
+            val socketAddr = InetSocketAddress(peerIp, port)
+            val peerAddr = KicheAddress(ip = peerIp, port = port)
+            val bindHost = if (peerIp.size == 16) "::" else "0.0.0.0"
+            log("ensureConnected: attempt ${index + 1}/${addresses.size} → $family (bind $bindHost)")
 
-        try {
-            log("ensureConnected: creating QUIC connection")
-            val newConn = KicheConnection.connect(host, scid, localAddr, peerAddr, qConfig)
+            val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(bindHost, 0))
+            val localSocketAddr = socket.localAddress as InetSocketAddress
+            val localAddr = KicheAddress(
+                ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
+                port = localSocketAddr.port,
+            )
+            val scid = Random.nextBytes(16)
+            val qConfig = KicheConfig().apply {
+                setApplicationProtos(H3_ALPN)
+                verifyPeer(config.verifyPeer)
+                config.caCertPath?.let { loadVerifyLocationsFromFile(it) }
+                setCcAlgorithm(config.ccAlgorithm)
+                setMaxIdleTimeout(config.maxIdleTimeoutMs)
+                setInitialMaxData(config.initialMaxData)
+                setInitialMaxStreamDataBidiLocal(config.initialMaxStreamDataBidiLocal)
+                setInitialMaxStreamDataBidiRemote(config.initialMaxStreamDataBidiRemote)
+                setInitialMaxStreamDataUni(config.initialMaxStreamDataUni)
+                setInitialMaxStreamsBidi(config.initialMaxStreamsBidi)
+                setInitialMaxStreamsUni(config.initialMaxStreamsUni)
+            }
 
             try {
-                // Drive initial handshake packets (suspend send — no contention during handshake)
-                log("ensureConnected: draining initial handshake packets")
-                drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
-
-                // Handshake loop — no other coroutine accesses newConn yet.
-                // Uses the same timeout pattern as the event loop: wait for a
-                // packet up to quiche's timeout, then call onTimeout() to drive
-                // retransmissions. Without this, a lost initial packet would
-                // hang the handshake forever.
-                log("ensureConnected: entering handshake loop")
-                while (!newConn.isEstablished) {
-                    val timeout = newConn.timeoutAsMillis().coerceIn(1, 1000)
-                    val dgram = withTimeoutOrNull(timeout) { socket.receive() }
-                    if (dgram == null) {
-                        newConn.onTimeout()
-                        drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
-                        continue
-                    }
-                    val bytes = dgram.packet.readByteArray()
-                    newConn.recv(buf = bytes, len = bytes.size, from = peerAddr, to = localAddr)
+                val newConn = KicheConnection.connect(host, scid, localAddr, peerAddr, qConfig)
+                try {
+                    // First flight — an unroutable address (e.g. IPv6 on the iOS Simulator) throws
+                    // EHOSTUNREACH here, caught below to fall back to the next address.
                     drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
-                }
 
-                log("ensureConnected: handshake complete")
-                // Create H3 layer
-                val h3Cfg = KicheH3Config()
-                val h3 = try {
-                    KicheH3Connection(newConn, h3Cfg)
+                    // Handshake loop: wait for a packet up to quiche's timeout, drive retransmits on
+                    // timeout. If quiche gives up (idle/handshake timeout → isClosed), bail so we
+                    // fall back instead of spinning.
+                    while (!newConn.isEstablished) {
+                        if (newConn.isClosed) error("QUIC connection closed during handshake")
+                        val timeout = newConn.timeoutAsMillis().coerceIn(1, 1000)
+                        val dgram = withTimeoutOrNull(timeout) { socket.receive() }
+                        if (dgram == null) {
+                            newConn.onTimeout()
+                            drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                            continue
+                        }
+                        val bytes = dgram.packet.readByteArray()
+                        newConn.recv(buf = bytes, len = bytes.size, from = peerAddr, to = localAddr)
+                        drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                    }
+
+                    log("ensureConnected: handshake complete via $family")
+                    val h3Cfg = KicheH3Config()
+                    val h3 = try {
+                        KicheH3Connection(newConn, h3Cfg)
+                    } catch (e: Throwable) {
+                        h3Cfg.close()
+                        throw e
+                    }
+
+                    // Publish connection state (already under mutex)
+                    udpSocket = socket
+                    conn = newConn
+                    quicConfig = qConfig
+                    h3Config = h3Cfg
+                    h3Conn = h3
+                    peerSocketAddr = socketAddr
+                    local = localAddr
+                    peer = peerAddr
+
+                    eventLoopJob = launch { eventLoop(newConn, h3, h3Cfg, qConfig, socket, socketAddr, localAddr, peerAddr) }
+                    return@withLock
                 } catch (e: Throwable) {
-                    h3Cfg.close()
+                    newConn.close()
                     throw e
                 }
-
-                // Publish connection state (already under mutex)
-                udpSocket = socket
-                conn = newConn
-                quicConfig = qConfig
-                h3Config = h3Cfg
-                h3Conn = h3
-                peerSocketAddr = socketAddr
-                local = localAddr
-                peer = peerAddr
-
-                // Start background event loop
-                eventLoopJob = launch { eventLoop(newConn, h3, h3Cfg, qConfig, socket, socketAddr, localAddr, peerAddr) }
-            } catch (e: Throwable) {
-                newConn.close()
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                qConfig.close()
+                runCatching { socket.close() }
                 throw e
+            } catch (e: Throwable) {
+                qConfig.close()
+                runCatching { socket.close() }
+                lastError = e
+                log("ensureConnected: $family attempt failed (${e.message}); trying next address")
             }
-        } catch (e: Throwable) {
-            qConfig.close()
-            socket.close()
-            throw e
         }
+
+        throw IOException("Failed to connect to $host:$port over QUIC (tried ${addresses.size} address(es))", lastError)
     }
 
     /**
@@ -543,97 +559,107 @@ internal class KicheEndpoint(
     suspend fun openWebTransportSession(url: Url): WebTransportSession {
         log("openWebTransportSession: $url")
 
-        // Prefer IPv4 and pin the socket address to the resolved bytes (see ensureConnected).
-        val peerIp = resolveHostPreferIpv4(host)
-            ?: error("Failed to resolve address for $host")
-        val socketAddr = InetSocketAddress(peerIp, port)
-        val peerAddr = KicheAddress(ip = peerIp, port = port)
+        // Same sequential per-address Happy-Eyeballs fallback as ensureConnected (see the note
+        // there: RFC 8305, no IP-family preference, fall back on a failed handshake).
+        val addresses = resolveHostAddresses(host)
+        if (addresses.isEmpty()) error("Failed to resolve address for $host")
 
-        // Wildcard local bind of the peer's family (see ensureConnected for why not `host`).
-        val bindHost = if (peerIp.size == 16) "::" else "0.0.0.0"
-        val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(bindHost, 0))
-        val localSocketAddr = socket.localAddress as InetSocketAddress
-        val localAddr = KicheAddress(
-            ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
-            port = localSocketAddr.port,
-        )
-
-        val scid = Random.nextBytes(16)
         val handshakeBuf = ByteArray(MAX_DATAGRAM_SIZE)
+        var lastError: Throwable? = null
 
-        val qConfig = KicheConfig().apply {
-            setApplicationProtos(H3_ALPN)
-            verifyPeer(config.verifyPeer)
-            config.caCertPath?.let { loadVerifyLocationsFromFile(it) }
-            setCcAlgorithm(config.ccAlgorithm)
-            setMaxIdleTimeout(config.maxIdleTimeoutMs)
-            setInitialMaxData(config.initialMaxData)
-            setInitialMaxStreamDataBidiLocal(config.initialMaxStreamDataBidiLocal)
-            setInitialMaxStreamDataBidiRemote(config.initialMaxStreamDataBidiRemote)
-            setInitialMaxStreamDataUni(config.initialMaxStreamDataUni)
-            setInitialMaxStreamsBidi(config.initialMaxStreamsBidi)
-            setInitialMaxStreamsUni(config.initialMaxStreamsUni)
-            enableDgram(true, 65535, 65535)
-        }
+        for ((index, peerIp) in addresses.withIndex()) {
+            val family = if (peerIp.size == 16) "IPv6" else "IPv4"
+            val socketAddr = InetSocketAddress(peerIp, port)
+            val peerAddr = KicheAddress(ip = peerIp, port = port)
+            val bindHost = if (peerIp.size == 16) "::" else "0.0.0.0"
+            log("openWebTransportSession: attempt ${index + 1}/${addresses.size} → $family")
 
-        try {
-            val newConn = KicheConnection.connect(host, scid, localAddr, peerAddr, qConfig)
+            val socket = aSocket(selectorManager).udp().bind(InetSocketAddress(bindHost, 0))
+            val localSocketAddr = socket.localAddress as InetSocketAddress
+            val localAddr = KicheAddress(
+                ip = localSocketAddr.resolveAddress() ?: byteArrayOf(0, 0, 0, 0),
+                port = localSocketAddr.port,
+            )
+            val scid = Random.nextBytes(16)
+            val qConfig = KicheConfig().apply {
+                setApplicationProtos(H3_ALPN)
+                verifyPeer(config.verifyPeer)
+                config.caCertPath?.let { loadVerifyLocationsFromFile(it) }
+                setCcAlgorithm(config.ccAlgorithm)
+                setMaxIdleTimeout(config.maxIdleTimeoutMs)
+                setInitialMaxData(config.initialMaxData)
+                setInitialMaxStreamDataBidiLocal(config.initialMaxStreamDataBidiLocal)
+                setInitialMaxStreamDataBidiRemote(config.initialMaxStreamDataBidiRemote)
+                setInitialMaxStreamDataUni(config.initialMaxStreamDataUni)
+                setInitialMaxStreamsBidi(config.initialMaxStreamsBidi)
+                setInitialMaxStreamsUni(config.initialMaxStreamsUni)
+                enableDgram(true, 65535, 65535)
+            }
 
             try {
-                // Drive handshake
-                drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
-                while (!newConn.isEstablished) {
-                    val timeout = newConn.timeoutAsMillis().coerceIn(1, 1000)
-                    val dgram = withTimeoutOrNull(timeout) { socket.receive() }
-                    if (dgram == null) {
-                        newConn.onTimeout()
-                        drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
-                        continue
-                    }
-                    val bytes = dgram.packet.readByteArray()
-                    newConn.recv(bytes, bytes.size, peerAddr, localAddr)
+                val newConn = KicheConnection.connect(host, scid, localAddr, peerAddr, qConfig)
+                try {
                     drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
-                }
+                    while (!newConn.isEstablished) {
+                        if (newConn.isClosed) error("QUIC connection closed during handshake")
+                        val timeout = newConn.timeoutAsMillis().coerceIn(1, 1000)
+                        val dgram = withTimeoutOrNull(timeout) { socket.receive() }
+                        if (dgram == null) {
+                            newConn.onTimeout()
+                            drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                            continue
+                        }
+                        val bytes = dgram.packet.readByteArray()
+                        newConn.recv(bytes, bytes.size, peerAddr, localAddr)
+                        drainSendSuspend(newConn, handshakeBuf, socket, socketAddr)
+                    }
 
-                log("openWebTransportSession: QUIC handshake complete")
+                    log("openWebTransportSession: QUIC handshake complete via $family")
 
-                // Create H3 layer with Extended CONNECT enabled
-                val h3Cfg = KicheH3Config().apply {
-                    enableExtendedConnect(true)
-                }
-                val h3 = try {
-                    KicheH3Connection(newConn, h3Cfg)
+                    // Create H3 layer with Extended CONNECT enabled
+                    val h3Cfg = KicheH3Config().apply {
+                        enableExtendedConnect(true)
+                    }
+                    val h3 = try {
+                        KicheH3Connection(newConn, h3Cfg)
+                    } catch (e: Throwable) {
+                        h3Cfg.close()
+                        throw e
+                    }
+
+                    // Create the session and establish it
+                    val session = KicheWebTransportSession(
+                        conn = newConn,
+                        h3Conn = h3,
+                        h3Config = h3Cfg,
+                        quicConfig = qConfig,
+                        udpSocket = socket,
+                        peerSocketAddr = socketAddr,
+                        localAddr = localAddr,
+                        peerAddr = peerAddr,
+                        parentContext = coroutineContext,
+                    )
+
+                    val path = url.encodedPathAndQuery.ifEmpty { "/" }
+                    session.establish(path, url.hostWithPort)
+                    return session
                 } catch (e: Throwable) {
-                    h3Cfg.close()
+                    newConn.close()
                     throw e
                 }
-
-                // Create the session and establish it
-                val session = KicheWebTransportSession(
-                    conn = newConn,
-                    h3Conn = h3,
-                    h3Config = h3Cfg,
-                    quicConfig = qConfig,
-                    udpSocket = socket,
-                    peerSocketAddr = socketAddr,
-                    localAddr = localAddr,
-                    peerAddr = peerAddr,
-                    parentContext = coroutineContext,
-                )
-
-                val path = url.encodedPathAndQuery.ifEmpty { "/" }
-                session.establish(path, url.hostWithPort)
-
-                return session
-            } catch (e: Throwable) {
-                newConn.close()
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                qConfig.close()
+                runCatching { socket.close() }
                 throw e
+            } catch (e: Throwable) {
+                qConfig.close()
+                runCatching { socket.close() }
+                lastError = e
+                log("openWebTransportSession: $family attempt failed (${e.message}); trying next address")
             }
-        } catch (e: Throwable) {
-            qConfig.close()
-            socket.close()
-            throw e
         }
+
+        throw IOException("Failed to connect to $host:$port over QUIC (tried ${addresses.size} address(es))", lastError)
     }
 
     companion object {

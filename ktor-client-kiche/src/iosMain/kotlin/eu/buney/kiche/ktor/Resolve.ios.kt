@@ -25,18 +25,18 @@ import platform.posix.sockaddr_in
 import platform.posix.sockaddr_in6
 
 @OptIn(ExperimentalForeignApi::class)
-internal actual fun resolveHostPreferIpv4(host: String): ByteArray? = memScoped {
+internal actual fun resolveHostAddresses(host: String): List<ByteArray> = memScoped {
     val hints = alloc<addrinfo>()
     memset(hints.ptr, 0, sizeOf<addrinfo>().convert())
     hints.ai_family = AF_UNSPEC
     hints.ai_socktype = SOCK_DGRAM
 
     val result = allocPointerTo<addrinfo>()
-    if (getaddrinfo(host, null, hints.ptr, result.ptr) != 0) return@memScoped null
+    if (getaddrinfo(host, null, hints.ptr, result.ptr) != 0) return@memScoped emptyList()
 
     try {
-        // Prefer an IPv4 address; remember the first IPv6 as a fallback for v6-only hosts.
-        var v6: ByteArray? = null
+        // Collect every address in the order getaddrinfo returns them (IPv6-first per RFC 6724).
+        val out = mutableListOf<ByteArray>()
         var node = result.value
         while (true) {
             val info = (node ?: break).pointed
@@ -44,24 +44,24 @@ internal actual fun resolveHostPreferIpv4(host: String): ByteArray? = memScoped 
             if (sa != null) {
                 when (info.ai_family) {
                     AF_INET -> {
-                        val out = ByteArray(4)
-                        out.usePinned {
+                        val bytes = ByteArray(4)
+                        bytes.usePinned {
                             memcpy(it.addressOf(0), sa.reinterpret<sockaddr_in>().pointed.sin_addr.ptr, 4.convert())
                         }
-                        return@memScoped out
+                        out += bytes
                     }
-                    AF_INET6 -> if (v6 == null) {
-                        val out = ByteArray(16)
-                        out.usePinned {
+                    AF_INET6 -> {
+                        val bytes = ByteArray(16)
+                        bytes.usePinned {
                             memcpy(it.addressOf(0), sa.reinterpret<sockaddr_in6>().pointed.sin6_addr.ptr, 16.convert())
                         }
-                        v6 = out
+                        out += bytes
                     }
                 }
             }
             node = info.ai_next
         }
-        v6
+        out
     } finally {
         freeaddrinfo(result.value)
     }
