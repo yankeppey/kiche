@@ -1,0 +1,134 @@
+package eu.buney.kiche.example
+
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import eu.buney.kiche.ktor.Kiche
+import io.ktor.client.HttpClient
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.readRawBytes
+import io.ktor.utils.io.readUTF8Line
+import kotlinx.coroutines.CancellationException
+import kotlin.time.TimeSource
+
+/** The result of one demo operation, rendered by [ResultCard]. */
+sealed interface OpState {
+    data object Idle : OpState
+    data object Loading : OpState
+    data class Success(val text: String) : OpState
+    data class Failure(val message: String) : OpState
+}
+
+/**
+ * Owns a single [HttpClient] backed by the Kiche HTTP/3 engine and drives the demo operations.
+ *
+ * One client is shared across every screen on purpose: it shows Kiche's connection pooling —
+ * the first request to a host performs the QUIC handshake, later requests reuse the connection.
+ *
+ * State is exposed as Compose [mutableStateOf] (the Paragem `@Stable` state-holder idiom),
+ * so screens read it directly without flows. This is a plain holder, not an androidx ViewModel,
+ * to avoid platform `ViewModelStoreOwner` wiring — it is created in [App] and closed on dispose.
+ */
+@Stable
+class Http3DemoViewModel {
+
+    val client: HttpClient = HttpClient(Kiche) {
+        engine {
+            // DEMO ONLY: skip TLS verification so we don't have to bundle a CA bundle.
+            // quiche has no system trust store (see docs/release-readiness.md → "TLS trust").
+            // Never ship verifyPeer = false in a real app.
+            verifyPeer = false
+        }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 20_000
+            connectTimeoutMillis = 10_000
+        }
+    }
+
+    var connectionInfo by mutableStateOf<OpState>(OpState.Idle)
+        private set
+    var echo by mutableStateOf<OpState>(OpState.Idle)
+        private set
+    var download by mutableStateOf<OpState>(OpState.Idle)
+        private set
+    var streaming by mutableStateOf<OpState>(OpState.Idle)
+        private set
+
+    /** GET /get — confirms the handshake worked and reports the negotiated protocol. */
+    suspend fun loadConnectionInfo() {
+        connectionInfo = OpState.Loading
+        connectionInfo = runOp {
+            val response = client.get("${Endpoints.HTTPBIN}/get")
+            buildString {
+                appendLine("Status:   ${response.status}")
+                appendLine("Protocol: ${response.version}")   // expect HTTP/3.0
+                appendLine()
+                appendLine(response.bodyAsText().take(600))
+            }
+        }
+    }
+
+    /** POST /post — echoes the request body back inside the response JSON. */
+    suspend fun runEcho(message: String) {
+        echo = OpState.Loading
+        echo = runOp {
+            val response = client.post("${Endpoints.HTTPBIN}/post") { setBody(message) }
+            response.bodyAsText().take(1200)
+        }
+    }
+
+    /** GET /bytes/{n} — downloads n random bytes (httpbin caps this at ~100 KB). */
+    suspend fun runDownload(numBytes: Int) {
+        download = OpState.Loading
+        download = runOp {
+            val mark = TimeSource.Monotonic.markNow()
+            val bytes = client.get("${Endpoints.HTTPBIN}/bytes/$numBytes").readRawBytes()
+            val elapsed = mark.elapsedNow()
+            "Requested: $numBytes bytes\nReceived:  ${bytes.size} bytes\nElapsed:   $elapsed"
+        }
+    }
+
+    /**
+     * GET /stream/{n} — the server emits n newline-delimited JSON objects, chunked.
+     *
+     * Reads the response body as a [io.ktor.utils.io.ByteReadChannel] line-by-line — the
+     * idiomatic streaming-read pattern. NOTE: the current engine buffers the full body before
+     * exposing it (see docs/release-readiness.md), so lines are not yet delivered truly
+     * incrementally — only the API usage is streaming.
+     */
+    suspend fun runStreaming(lines: Int) {
+        streaming = OpState.Loading
+        streaming = runOp {
+            val channel = client.get("${Endpoints.HTTPBIN}/stream/$lines").bodyAsChannel()
+            var count = 0
+            val preview = StringBuilder()
+            while (true) {
+                // TODO: readUTF8Line is deprecated in ktor 3.4 (use readLine/readLineStrict).
+                // Tolerated for now; tracked in example/README.md. See KICHE notes.
+                val line = channel.readUTF8Line() ?: break
+                count++
+                if (count <= 5) preview.appendLine(line.take(120))
+            }
+            "Received $count streamed JSON line(s).\n\nFirst lines:\n$preview"
+        }
+    }
+
+    fun close() {
+        client.close()
+    }
+
+    private suspend fun runOp(block: suspend () -> String): OpState =
+        try {
+            OpState.Success(block())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            OpState.Failure(e.message ?: e.toString())
+        }
+}

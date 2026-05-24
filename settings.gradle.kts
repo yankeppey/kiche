@@ -22,4 +22,5 @@ include(
     ":ktor-client-kiche",
     ":ktor-client-h3-adaptive",
     ":ktor-server-kiche",
+    ":example",
 )
