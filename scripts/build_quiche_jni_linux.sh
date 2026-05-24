@@ -49,4 +49,14 @@ cmake -B "$BUILD_DIR" -S "$SRC_DIR" \
   -DQUICHE_LIB_PATH="$PREFIX/lib/libquiche.a"
 cmake --build "$BUILD_DIR" --config Release
 
-echo "✅  Built $BUILD_DIR/libquiche_jni.so"
+# Strip DWARF debug info. quiche's release build (Rust + vendored BoringSSL via
+# CMake) embeds ~24 MB of DWARF into libquiche.a, and the GNU linker copies it
+# into the .so. --strip-debug removes only the .debug_* sections; the dynamic
+# symbol table (the exported JNI entry points) and all code stay intact. macOS
+# (DWARF -> .dSYM) and Windows (-> .pdb) don't carry it, so only Linux needs this.
+SO="$BUILD_DIR/libquiche_jni.so"
+size() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1"; }
+echo "Stripping debug info ($(size "$SO") bytes before)..."
+strip --strip-debug "$SO"
+
+echo "✅  Built $SO ($(size "$SO") bytes after strip)"
