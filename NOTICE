@@ -1,0 +1,23 @@
+Kiche
+Copyright 2026 Andrei Buneyeu (https://buney.eu)
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+see the LICENSE file for the full terms.
+
+----------------------------------------------------------------------
+
+This product bundles, compiles in, and/or distributes alongside its native
+libraries the following third-party components. Their full license texts are
+reproduced in the THIRD-PARTY-LICENSES.txt file distributed with this product.
+
+  * quiche — BSD-2-Clause
+      QUIC and HTTP/3 transport, by Cloudflare, Inc.
+      Distributed in compiled (Object) form inside Kiche's native libraries.
+      https://github.com/cloudflare/quiche
+
+  * BoringSSL — OpenSSL License + original SSLeay License + ISC License
+      TLS and cryptography, by Google Inc. (a fork of OpenSSL).
+      Statically linked into the bundled quiche native libraries.
+      Includes fiat-crypto under the MIT License, which is compiled into the
+      non-test libraries.
+      https://boringssl.googlesource.com/boringssl
