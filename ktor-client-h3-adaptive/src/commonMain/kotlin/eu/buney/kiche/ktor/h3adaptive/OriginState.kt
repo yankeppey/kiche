@@ -52,6 +52,15 @@ internal class OriginState(
      * Whether QUIC should be attempted for this origin right now.
      */
     suspend fun shouldUseQuic(): Boolean = mutex.withLock {
+        // RFC 7838: an Alt-Svc advertisement is only valid for `ma` seconds. Once it expires,
+        // forget it and fall back to TCP — the next TCP response re-advertises and refreshes it.
+        // This is purely in-memory; persisting across restarts (as browsers do) would belong
+        // behind an optional, consumer-supplied store, not baked in here.
+        if (altSvcEntry?.isExpired() == true) {
+            status = Status.UNKNOWN
+            altSvcEntry = null
+            resetBackoff()
+        }
         when (status) {
             Status.UNKNOWN -> false
             Status.AVAILABLE, Status.CONFIRMED -> true
