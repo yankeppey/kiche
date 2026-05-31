@@ -37,6 +37,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+            // AGP auto-packages libquiche.so via CMake's SHARED IMPORTED target;
+            // consumers must get it from libquiche-android, not from us.
+            excludes += "**/libquiche.so"
         }
     }
 
