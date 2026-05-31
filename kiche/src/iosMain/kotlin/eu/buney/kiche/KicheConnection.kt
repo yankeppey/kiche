@@ -572,7 +572,7 @@ internal fun MemScope.fillSockaddr(ptr: CPointer<sockaddr_storage>, addr: KicheA
     if (addr.ip.size == 4) {
         val sa = ptr.reinterpret<sockaddr_in>().pointed
         sa.sin_family = AF_INET.toUByte()
-        sa.sin_port = kiche_htons(addr.port.toUShort())
+        sa.sin_port = hostToNetShort(addr.port.toUShort())
         addr.ip.usePinned { pinned ->
             memcpy(sa.sin_addr.ptr, pinned.addressOf(0), 4u)
         }
@@ -580,7 +580,7 @@ internal fun MemScope.fillSockaddr(ptr: CPointer<sockaddr_storage>, addr: KicheA
     } else {
         val sa6 = ptr.reinterpret<sockaddr_in6>().pointed
         sa6.sin6_family = AF_INET6.toUByte()
-        sa6.sin6_port = kiche_htons(addr.port.toUShort())
+        sa6.sin6_port = hostToNetShort(addr.port.toUShort())
         addr.ip.usePinned { pinned ->
             memcpy(sa6.sin6_addr.ptr, pinned.addressOf(0), 16u)
         }
@@ -595,12 +595,12 @@ internal fun extractSockaddr(ptr: CPointer<sockaddr_storage>): KicheAddress {
         val sa = ptr.reinterpret<sockaddr_in>().pointed
         val ip = ByteArray(4)
         ip.usePinned { pinned -> memcpy(pinned.addressOf(0), sa.sin_addr.ptr, 4u) }
-        KicheAddress(ip, kiche_ntohs(sa.sin_port).toInt())
+        KicheAddress(ip, netToHostShort(sa.sin_port).toInt())
     } else {
         val sa6 = ptr.reinterpret<sockaddr_in6>().pointed
         val ip = ByteArray(16)
         ip.usePinned { pinned -> memcpy(pinned.addressOf(0), sa6.sin6_addr.ptr, 16u) }
-        KicheAddress(ip, kiche_ntohs(sa6.sin6_port).toInt())
+        KicheAddress(ip, netToHostShort(sa6.sin6_port).toInt())
     }
     //endregion
 }

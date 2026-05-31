@@ -1,0 +1,75 @@
+# Reusable workflow: build libquiche.{so,dll} on Linux + Windows runners
+# (cargo only, no JNI compile). Used by release-libquiche.yml.
+#
+# Uploads `libquiche-desktop-<OS>` artifacts laid out as
+#   <os>/<arch>/libquiche.so          (Linux)
+#   <os>/<arch>/libquiche.dll         (Windows)
+#   <os>/<arch>/libquiche.dll.lib     (Windows import lib)
+# The :libquiche module's `-Plibquiche.desktopDynamicDir` consumes this layout.
+name: libquiche desktop natives
+
+on:
+  workflow_call:
+    inputs:
+      retention-days:
+        description: How long to keep the uploaded native artifacts.
+        type: number
+        required: false
+        default: 1
+
+jobs:
+  build:
+    name: libquiche native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/quiche
+
+      - name: Install NASM (Windows — required by BoringSSL)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build Linux libquiche
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/build_libquiche_linux.sh x86_64
+
+      - name: Build Windows libquiche
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build_libquiche_windows.ps1 x86_64
+
+      - name: Stage native artifact
+        shell: bash
+        run: |
+          mkdir -p staged
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            mkdir -p staged/linux/x86_64
+            cp build/quiche/linux/x86_64/libquiche.so staged/linux/x86_64/
+          else
+            mkdir -p staged/windows/x86_64
+            cp build/quiche/windows/x86_64/quiche.dll     staged/windows/x86_64/
+            cp build/quiche/windows/x86_64/quiche.dll.lib staged/windows/x86_64/
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libquiche-desktop-${{ runner.os }}
+          path: staged/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

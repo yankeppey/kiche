@@ -1,13 +1,15 @@
-# Tag-triggered release to Maven Central. Push a version tag (e.g. v0.1.0-alpha.1)
-# to publish. The tag must match `kiche` in gradle/libs.versions.toml — the
-# library version is the single source of truth and the tag has to track it
-# (logic ported from media.net's Jenkinsfiles).
+# Tag-triggered :kiche release to Maven Central. Push a version tag (e.g.
+# v0.1.0-alpha.1) to publish. The tag must match `kiche` in
+# gradle/libs.versions.toml (logic ported from media.net's Jenkinsfiles).
+#
+# Prerequisite: the `libquiche` version pinned in libs.versions.toml must
+# already be PUBLISHED on Maven Central (via release-libquiche.yml). This job
+# resolves libquiche transitively and packages :kiche on top of it.
 #
 # The deployment lands VALIDATED on https://central.sonatype.com/publishing/deployments;
-# promote it to PUBLISHED manually once you're happy with it.
+# promote to PUBLISHED manually once you're happy with it.
 #
-# Required repository secrets (same names/values as the Kopus project — same
-# eu.buney namespace, Sonatype account and signing key):
+# Required repository secrets:
 #   MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
 #   SIGNING_KEY (ASCII-armored private key), SIGNING_KEY_ID, SIGNING_KEY_PASSWORD
 name: Release
@@ -19,7 +21,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 jobs:
-  # Linux/Windows .so/.dll, retained long enough for the publish job to fetch.
+  # Linux/Windows libquiche_jni.{so,dll}, retained long enough for the publish job to fetch.
   desktop-natives:
     name: Desktop natives
     uses: ./.github/workflows/desktop-natives.yml
@@ -34,11 +36,9 @@ jobs:
       contents: write   # create the GitHub Release
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: recursive
+        # Submodule checkout no longer required — :kiche doesn't touch
+        # third_party/quiche directly; libquiche binaries come from Maven Central.
 
-      # media.net-style guard: refuse to publish if the tag and the build
-      # version disagree, so a v0.1.0 tag can never ship a 0.1.1 build.
       - name: Verify tag matches libs.versions.toml
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
@@ -56,43 +56,23 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Install Rust + cross targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: >-
-            aarch64-apple-darwin,x86_64-apple-darwin,
-            aarch64-apple-ios,aarch64-apple-ios-sim,
-            aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: third_party/quiche
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
-
+      # Android NDK is still required: AGP externalNativeBuild compiles
+      # libquiche_jni.so for the Android target. The NDK ships its own clang,
+      # so no separate host C toolchain install is needed for Android.
       - name: Install Android NDK
         run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724"
 
-      - name: Download Linux/Windows natives
+      - name: Download Linux/Windows kiche_jni natives
         uses: actions/download-artifact@v8
         with:
           path: desktop-natives
           pattern: desktop-native-*
           merge-multiple: true
 
-      - name: Build Apple + macOS JNI natives
-        run: |
-          bash scripts/build_quiche_apple.sh
-          bash scripts/build_quiche_jni.sh
-
-      # publishToMavenCentral (not publishAndRelease...) so the deployment is
-      # VALIDATED and we promote it manually. All five modules go up in one
-      # Gradle invocation -> a single Central deployment. Android natives build
-      # via cargo-ndk during the AAR assembly; macOS/iOS natives are reused from
-      # the step above (ci.skip.native.build); Linux/Windows are injected from
-      # the downloaded artifacts via kiche.desktopNativesDir.
+      # Gradle resolves eu.buney.libquiche:libquiche from Maven Central, runs
+      # the extract tasks, then compiles libquiche_jni for macOS host + Android
+      # via its own task wiring (buildJniMacos + AGP externalNativeBuild).
+      # Linux/Windows kiche_jni libs come from -Pkiche.desktopNativesDir.
       - name: Publish to Maven Central (VALIDATED)
         run: >-
           ./gradlew
@@ -101,7 +81,6 @@ jobs:
           :ktor-client-kiche:publishToMavenCentral
           :ktor-server-kiche:publishToMavenCentral
           :ktor-client-h3-adaptive:publishToMavenCentral
-          -Pci.skip.native.build
           -Pkiche.desktopNativesDir=${{ github.workspace }}/desktop-natives
           --no-configuration-cache
         env:

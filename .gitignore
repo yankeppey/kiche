@@ -22,6 +22,11 @@ captures
 hs_err_pid*.log
 replay_pid*.log
 
+# :libquiche staging dirs — populated by Gradle from cargo outputs, not committed.
+# AGP/KMP picks files up from these convention paths automatically.
+libquiche/src/androidMain/jniLibs/
+libquiche/src/jvmMain/resources/native/
+
 # Local Claude Code working files — never committed
 CLAUDE.md
 .claude/

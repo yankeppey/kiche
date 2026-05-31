@@ -39,10 +39,14 @@ endif()
 target_include_directories(quiche_jni PRIVATE ${QUICHE_INCLUDE_DIR})
 
 if(ANDROID)
-    set(PREBUILT_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../build/quiche/android)
-    set(QUICHE_LIB ${PREBUILT_ROOT}/${ANDROID_ABI}/lib/libquiche.a)
+    # libquiche.so is unpacked from :libquiche-android's AAR by Gradle and the
+    # path passed in via LIBQUICHE_ANDROID_JNI_DIR.
+    if(NOT DEFINED LIBQUICHE_ANDROID_JNI_DIR)
+        message(FATAL_ERROR "LIBQUICHE_ANDROID_JNI_DIR is not set — run via Gradle.")
+    endif()
+    set(QUICHE_LIB ${LIBQUICHE_ANDROID_JNI_DIR}/${ANDROID_ABI}/libquiche.so)
 
-    add_library(quiche STATIC IMPORTED)
+    add_library(quiche SHARED IMPORTED)
     set_target_properties(quiche PROPERTIES IMPORTED_LOCATION ${QUICHE_LIB})
 
     # 16KB page size alignment for Android 15+ compatibility
@@ -53,23 +57,30 @@ if(ANDROID)
 
     target_link_libraries(quiche_jni PRIVATE quiche ${JNI_LIBRARIES} m)
 else ()
+    # Desktop JVM JNI links dynamically against libquiche.{dylib,so} / quiche.dll;
+    # the path is provided by Gradle from the unpacked :libquiche-jvm artifact.
     if(NOT DEFINED QUICHE_LIB_PATH)
-        set(QUICHE_LIB_PATH ${CMAKE_CURRENT_LIST_DIR}/../../build/quiche/macosx/${CMAKE_SYSTEM_PROCESSOR}/lib/libquiche.a)
+        message(FATAL_ERROR "QUICHE_LIB_PATH must point at the libquiche dynamic library — run via Gradle.")
     endif()
-    add_library(quiche STATIC IMPORTED)
+    add_library(quiche SHARED IMPORTED)
     set_target_properties(quiche PROPERTIES IMPORTED_LOCATION "${QUICHE_LIB_PATH}")
 
     if (WIN32)
+        # CMake's SHARED IMPORTED on Windows needs the import library (.dll.lib)
+        # at link time, separate from the runtime DLL given in IMPORTED_LOCATION.
+        if(NOT DEFINED QUICHE_IMPLIB)
+            message(FATAL_ERROR "QUICHE_IMPLIB must point at the import library (quiche.dll.lib) on Windows.")
+        endif()
+        set_target_properties(quiche PROPERTIES IMPORTED_IMPLIB "${QUICHE_IMPLIB}")
         # MSVC omits the "lib" prefix on DLLs; force it so the artifact is
         # libquiche_jni.dll — the exact name KicheLoader.load() looks up.
         set_target_properties(quiche_jni PROPERTIES PREFIX "lib")
-        # quiche + its vendored BoringSSL pull in these Win32 system libraries.
-        # (No libm on MSVC, and JNI symbols are resolved by the host JVM at load
-        # time, so we don't link the jvm import library here.)
-        target_link_libraries(quiche_jni PRIVATE quiche
-            ws2_32 userenv ntdll bcrypt crypt32 advapi32)
+        # ws2_32 is needed for htons/ntohs in helpers.c (Winsock is the Windows
+        # equivalent of <arpa/inet.h>). Other Win32 deps libquiche pulled in
+        # statically before (bcrypt, crypt32, advapi32, ntdll, userenv) are now
+        # linked into libquiche.dll itself.
+        target_link_libraries(quiche_jni PRIVATE quiche ws2_32)
     else()
-        # macOS and Linux both link libm.
         target_link_libraries(quiche_jni PRIVATE quiche m)
     endif()
 endif()

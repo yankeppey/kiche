@@ -1,0 +1,3 @@
+headers      = quiche.h
+headerFilter = quiche.h
+package      = quiche.c

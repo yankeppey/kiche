@@ -1,40 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the desktop-JVM JNI library for Linux: a static libquiche.a (Rust/cargo)
-# plus the libquiche_jni.so wrapper (CMake). Runs natively on a Linux x86_64 host
-# (no cross-compilation), which keeps quiche's vendored BoringSSL build simple.
+# Build the Linux JNI wrapper `libquiche_jni.so`, linked dynamically against
+# a pre-built `libquiche.so`. cargo is not invoked here.
+#
+# Required env vars:
+#   LIBQUICHE_JVM_NATIVE_ROOT — dir containing <arch>/libquiche.so
+#   QUICHE_INCLUDE_DIR        — dir containing quiche.h
 #
 # Usage: scripts/build_quiche_jni_linux.sh [x86_64|arm64]
 # Output: build/buildJniLinux/<arch>/libquiche_jni.so
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-QUICHE_DIR="$PROJECT_ROOT/third_party/quiche"
-QUICHE_OUT="$PROJECT_ROOT/build/quiche/linux"
 JNI_OUT="$PROJECT_ROOT/build/buildJniLinux"
 SRC_DIR="$PROJECT_ROOT/kiche/jni"
 
 ARCH="${1:-x86_64}"
 case "$ARCH" in
-  x86_64)        RUST_TARGET="x86_64-unknown-linux-gnu" ;;
-  arm64|aarch64) RUST_TARGET="aarch64-unknown-linux-gnu"; ARCH="arm64" ;;
+  x86_64) ;;
+  arm64|aarch64) ARCH="arm64" ;;
   *) echo "Unsupported arch: $ARCH (expected x86_64 or arm64)" >&2; exit 1 ;;
 esac
 
-CARGO="${CARGO:-cargo}"
+: "${LIBQUICHE_JVM_NATIVE_ROOT:?need LIBQUICHE_JVM_NATIVE_ROOT — pass via Gradle or workflow}"
+: "${QUICHE_INCLUDE_DIR:?need QUICHE_INCLUDE_DIR — pass via Gradle or workflow}"
 
-echo "▶️  Building quiche static lib for $RUST_TARGET ..."
-"$CARGO" build \
-  --manifest-path "$QUICHE_DIR/quiche/Cargo.toml" \
-  --target "$RUST_TARGET" \
-  --features ffi \
-  --release
-
-PREFIX="$QUICHE_OUT/$ARCH"
-mkdir -p "$PREFIX/lib" "$PREFIX/include"
-cp "$QUICHE_DIR/target/$RUST_TARGET/release/libquiche.a" "$PREFIX/lib/"
-cp "$QUICHE_DIR/quiche/include/quiche.h" "$PREFIX/include/"
+LIBQUICHE_SO="$LIBQUICHE_JVM_NATIVE_ROOT/$ARCH/libquiche.so"
+if [ ! -f "$LIBQUICHE_SO" ]; then
+  echo "ERROR: $LIBQUICHE_SO not found" >&2
+  exit 1
+fi
 
 if [ -z "${JAVA_HOME:-}" ]; then
   echo "Warning: JAVA_HOME not set — CMake's FindJNI may fail to locate jni.h" >&2
@@ -45,15 +41,13 @@ mkdir -p "$BUILD_DIR"
 cmake -B "$BUILD_DIR" -S "$SRC_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DJAVA_HOME="${JAVA_HOME:-}" \
-  -DQUICHE_INCLUDE_DIR="$PREFIX/include" \
-  -DQUICHE_LIB_PATH="$PREFIX/lib/libquiche.a"
+  -DQUICHE_INCLUDE_DIR="$QUICHE_INCLUDE_DIR" \
+  -DQUICHE_LIB_PATH="$LIBQUICHE_SO"
 cmake --build "$BUILD_DIR" --config Release
 
-# Strip DWARF debug info. quiche's release build (Rust + vendored BoringSSL via
-# CMake) embeds ~24 MB of DWARF into libquiche.a, and the GNU linker copies it
-# into the .so. --strip-debug removes only the .debug_* sections; the dynamic
-# symbol table (the exported JNI entry points) and all code stay intact. macOS
-# (DWARF -> .dSYM) and Windows (-> .pdb) don't carry it, so only Linux needs this.
+# Strip libquiche_jni.so. With dynamic linking the wrapper itself is small,
+# but the GNU linker can still leave .debug_* sections from CMake's
+# RelWithDebInfo / Release defaults.
 SO="$BUILD_DIR/libquiche_jni.so"
 size() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1"; }
 echo "Stripping debug info ($(size "$SO") bytes before)..."
