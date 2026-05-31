@@ -56,32 +56,14 @@ kotlin {
         publishLibraryVariants("release")
     }
 
-    val iosTargets = listOf(
-        iosArm64(),
-        iosSimulatorArm64(),
-    )
-    jvm()
-
-    listOf(
-        iosArm64(),
-        iosSimulatorArm64()
-    ).forEach {
+    listOf(iosArm64(), iosSimulatorArm64()).forEach {
         it.binaries.framework {
             baseName = "kiche"
             isStatic = true
         }
     }
+    jvm()
 
-    iosTargets.forEach { target ->
-        target.compilations.getByName("main") {
-            cinterops {
-                val libquiche by creating {
-                    defFile(project.file("cinterop/quiche.def"))
-                    includeDirs.allHeaders(layout.projectDirectory.file("../third_party/quiche/quiche/include").asFile)
-                }
-            }
-        }
-    }
     applyDefaultHierarchyTemplate()
     sourceSets {
         commonTest.dependencies {

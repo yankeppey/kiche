@@ -1,4 +1,0 @@
-headers      = quiche.h kiche_net.h
-headerFilter = **
-package      = quiche.c
-compilerOpts = -I../kiche/cinterop
