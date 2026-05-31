@@ -10,7 +10,7 @@ wraps [Cloudflare quiche](https://github.com/cloudflare/quiche) — a Rust imple
 connections, streams, datagrams ([RFC 9221](https://www.rfc-editor.org/rfc/rfc9221.html)), and
 HTTP/3 on **JVM, Android, and iOS**.
 
-> ## ⚠️ Experimental — `0.1.0-alpha.2`
+> ## ⚠️ Experimental — `0.1.0-alpha.3`
 >
 > This is an early alpha. **There are no API-stability guarantees of any kind** — anything may
 > change or be removed without notice or deprecation between releases. It is **not** recommended for
@@ -33,11 +33,11 @@ HTTP/3 on **JVM, Android, and iOS**.
 repositories { mavenCentral() }
 
 dependencies {
-    implementation("eu.buney.kiche:kiche:0.1.0-alpha.2")                   // core QUIC + HTTP/3
+    implementation("eu.buney.kiche:kiche:0.1.0-alpha.3")                   // core QUIC + HTTP/3
     // Ktor integrations — all optional:
-    implementation("eu.buney.kiche:ktor-client-kiche:0.1.0-alpha.2")       // HTTP/3 client engine (+ WebTransport)
-    implementation("eu.buney.kiche:ktor-server-kiche:0.1.0-alpha.2")       // HTTP/3 server engine (+ WebTransport)
-    implementation("eu.buney.kiche:ktor-client-h3-adaptive:0.1.0-alpha.2") // Alt-Svc TCP↔QUIC adaptive router
+    implementation("eu.buney.kiche:ktor-client-kiche:0.1.0-alpha.3")       // HTTP/3 client engine (+ WebTransport)
+    implementation("eu.buney.kiche:ktor-server-kiche:0.1.0-alpha.3")       // HTTP/3 server engine (+ WebTransport)
+    implementation("eu.buney.kiche:ktor-client-h3-adaptive:0.1.0-alpha.3") // Alt-Svc TCP↔QUIC adaptive router
 }
 ```
 

@@ -1,6 +1,6 @@
 [versions]
 agp = "9.2.1"
-kiche = "0.1.0-alpha.2"
+kiche = "0.1.0-alpha.3"
 libquiche = "0.28.0-1"
 kotlin = "2.3.21"
 ktor = "3.5.0"
