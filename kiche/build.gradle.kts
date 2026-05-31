@@ -73,6 +73,9 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+        iosMain.dependencies {
+            api(libs.libquiche)
+        }
         val androidAndJvmMain by creating {
             dependsOn(commonMain.get())
         }

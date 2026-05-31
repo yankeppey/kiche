@@ -2,7 +2,3 @@ headers      = quiche.h kiche_net.h
 headerFilter = **
 package      = quiche.c
 compilerOpts = -I../kiche/cinterop
-
-staticLibraries = libquiche.a
-libraryPaths.ios_arm64 = ../build/quiche/iphoneos/arm64/lib
-libraryPaths.ios_simulator_arm64 = ../build/quiche/iphone/arm64/lib
