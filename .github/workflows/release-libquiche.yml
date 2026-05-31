@@ -1,0 +1,100 @@
+# Tag-triggered libquiche release to Maven Central. Push a tag of the form
+# `libquiche-v<version>` to publish (e.g. `libquiche-v0.28.0-1`). The version
+# segment after `libquiche-v` must match `libquiche` in gradle/libs.versions.toml.
+#
+# The deployment lands VALIDATED on https://central.sonatype.com/publishing/deployments;
+# promote it to PUBLISHED manually. :kiche's release pipeline only resolves
+# libquiche once it's been promoted there (or to the snapshots repo for SNAPSHOTs).
+#
+# Required repository secrets:
+#   MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
+#   SIGNING_KEY (ASCII-armored private key), SIGNING_KEY_ID, SIGNING_KEY_PASSWORD
+name: Release libquiche
+
+on:
+  push:
+    tags:
+      - 'libquiche-v*'
+
+jobs:
+  desktop-natives:
+    name: libquiche desktop natives
+    uses: ./.github/workflows/libquiche-desktop-natives.yml
+    with:
+      retention-days: 7
+
+  publish:
+    name: Publish libquiche to Maven Central
+    runs-on: macos-latest
+    needs: [desktop-natives]
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Verify tag matches libs.versions.toml
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#libquiche-v}"
+          BUILD_VERSION=$(awk -F'"' '/^libquiche[[:space:]]*=/{print $2; exit}' gradle/libs.versions.toml)
+          if [ "$TAG_VERSION" != "$BUILD_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (parsed as $TAG_VERSION) does not match libquiche=$BUILD_VERSION in gradle/libs.versions.toml"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches libquiche=$BUILD_VERSION; proceeding."
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust + cross targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            aarch64-apple-darwin,x86_64-apple-darwin,
+            aarch64-apple-ios,aarch64-apple-ios-sim,
+            aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/quiche
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Install Android NDK
+        run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724"
+
+      - name: Download Linux/Windows libquiche binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: libquiche-desktop
+          pattern: libquiche-desktop-*
+          merge-multiple: true
+
+      # Gradle drives the Apple + Android cargo invocations directly via the
+      # `buildLibquiche{Apple,Android}` tasks (no manual shell-script call),
+      # then packs the Linux/Windows libs supplied via -Plibquiche.desktopDynamicDir.
+      - name: Publish to Maven Central (VALIDATED)
+        run: >-
+          ./gradlew
+          :libquiche:publishToMavenCentral
+          :libquiche-headers:publishToMavenCentral
+          -Plibquiche.desktopDynamicDir=${{ github.workspace }}/libquiche-desktop
+          --no-configuration-cache
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+      - name: Create GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

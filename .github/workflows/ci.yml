@@ -1,7 +1,10 @@
 # Build + test on every push to main and on pull requests. No publishing —
-# releases are tag-triggered (see release.yml). The macOS job runs the JVM tests
-# and compiles the Android and iOS targets; the desktop-natives job proves the
-# Linux/Windows JNI still builds.
+# releases are tag-triggered (see release.yml, release-libquiche.yml).
+#
+# The macOS job builds libquiche locally, publishes it to mavenLocal, then runs
+# :kiche tests + compiles the iOS and Android targets against that locally-
+# published libquiche. The desktop-natives job proves the Linux/Windows JNI
+# pipeline still builds end-to-end.
 name: CI
 
 on:
@@ -48,13 +51,18 @@ jobs:
       - name: Install Android NDK
         run: echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724"
 
-      - name: Build macOS quiche + JNI
-        run: |
-          bash scripts/build_quiche_apple.sh
-          bash scripts/build_quiche_jni.sh
+      # Publish libquiche to mavenLocal so :kiche's compile and test steps can
+      # resolve `eu.buney.libquiche:libquiche` like any other Maven dependency.
+      # This is the cheap stand-in for a Central release in PR validation.
+      - name: Publish libquiche to mavenLocal
+        run: >-
+          ./gradlew
+          :libquiche:publishToMavenLocal
+          :libquiche-headers:publishToMavenLocal
+          --no-configuration-cache
 
       - name: JVM tests
-        run: ./gradlew jvmTest -Pci.skip.native.build --no-configuration-cache
+        run: ./gradlew jvmTest --no-configuration-cache
 
       # The metadata (klib) compile of the shared iosMain source set is what
       # `publishToMavenCentral` builds — it catches errors the per-target iOS
@@ -64,7 +72,7 @@ jobs:
           ./gradlew
           compileKotlinIosArm64 compileKotlinIosSimulatorArm64
           compileIosMainKotlinMetadata
-          -Pci.skip.native.build --no-configuration-cache
+          --no-configuration-cache
 
       - name: Compile Android (release AAR)
         run: ./gradlew :kiche:assembleRelease --no-configuration-cache

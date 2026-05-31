@@ -155,7 +155,9 @@ val stageLibquicheJvmResources by tasks.registering(Copy::class) {
         into("macos/x86_64")
     }
 
-    // Linux/Windows dynamic libs injected by CI
+    // Linux/Windows dynamic libs injected by CI. The Windows side also ships
+    // the import library (libquiche.dll.lib) so downstream JNI builds can link
+    // against the DLL on MSVC.
     (project.findProperty("libquiche.desktopDynamicDir") as String?)?.let { dir ->
         from("$dir/linux/x86_64") {
             include("libquiche.so")
@@ -166,7 +168,7 @@ val stageLibquicheJvmResources by tasks.registering(Copy::class) {
             into("linux/arm64")
         }
         from("$dir/windows/x86_64") {
-            include("libquiche.dll")
+            include("libquiche.dll", "libquiche.dll.lib")
             into("windows/x86_64")
         }
     }

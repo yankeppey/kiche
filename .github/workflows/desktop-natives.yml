@@ -1,7 +1,12 @@
 # Reusable workflow: build the desktop-JVM JNI natives that can't be produced on
 # macOS — Linux (.so) and Windows (.dll). Each OS builds natively on its own
-# runner (quiche = Rust + vendored BoringSSL cross-compiles poorly), and uploads
-# a `desktop-native-<OS>` artifact laid out as <os>/<arch>/libquiche_jni.{so,dll}.
+# runner (quiche = Rust + vendored BoringSSL cross-compiles poorly).
+#
+# Two stages per runner:
+#   1. cargo: build libquiche.{a,so,dll,dll.lib}
+#   2. cmake: build libquiche_jni.{so,dll}, dynamically linked against libquiche
+#
+# Uploads `desktop-native-<OS>` artifact laid out as <os>/<arch>/libquiche_jni.{so,dll}.
 # Called by both ci.yml (validation) and release.yml (consumed by the JVM jar).
 name: Desktop natives
 
@@ -49,15 +54,34 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
 
+      - name: Build Linux libquiche
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/build_libquiche_linux.sh x86_64
+
       - name: Build Linux JNI
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          LIBQUICHE_JVM_NATIVE_ROOT: ${{ github.workspace }}/build/quiche/linux
+          QUICHE_INCLUDE_DIR: ${{ github.workspace }}/build/quiche/linux/x86_64/include
         run: bash scripts/build_quiche_jni_linux.sh x86_64
+
+      - name: Build Windows libquiche
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build_libquiche_windows.ps1 x86_64
 
       - name: Build Windows JNI
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/build_quiche_jni_windows.ps1 x86_64
+        env:
+          LIBQUICHE_JVM_NATIVE_ROOT: ${{ github.workspace }}/build/quiche/windows
+          QUICHE_INCLUDE_DIR: ${{ github.workspace }}/build/quiche/windows/x86_64/include
+        run: |
+          # The Windows JNI script expects libquiche.dll + libquiche.dll.lib in
+          # <root>/<arch>/. Mirror the layout `build_libquiche_windows.ps1` writes.
+          ./scripts/build_quiche_jni_windows.ps1 x86_64
 
       - name: Stage native artifact
         shell: bash
