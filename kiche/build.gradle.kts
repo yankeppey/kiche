@@ -19,12 +19,16 @@ android {
 
         consumerProguardFiles("consumer-rules.pro")
 
-        // Path is populated by `extractLibquicheAndroidJni`; CMakeLists reads
-        // `${LIBQUICHE_ANDROID_JNI_DIR}/<abi>/libquiche.so`.
+        // Paths point at the `extractLibquiche*` task outputs; CMakeLists.txt reads
+        // them as `LIBQUICHE_ANDROID_JNI_DIR` (per-ABI libquiche.so) and
+        // `QUICHE_INCLUDE_DIR` (quiche.h).
         externalNativeBuild {
             cmake {
                 arguments += "-DLIBQUICHE_ANDROID_JNI_DIR=${
                     layout.buildDirectory.dir("libquiche-android/jni").get().asFile.absolutePath
+                }"
+                arguments += "-DQUICHE_INCLUDE_DIR=${
+                    layout.buildDirectory.dir("libquiche-headers/include").get().asFile.absolutePath
                 }"
             }
         }
@@ -42,7 +46,7 @@ android {
         }
     }
     tasks.withType<ExternalNativeBuildTask>().configureEach {
-        dependsOn(extractLibquicheAndroidJni)
+        dependsOn(extractLibquicheAndroidJni, extractLibquicheHeaders)
     }
 }
 
@@ -83,12 +87,13 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
-        iosMain.dependencies {
-            api(libs.libquiche)
-        }
-        androidMain.dependencies {
-            api(libs.libquiche)
-        }
+        // libquiche provides:
+        //   iOS  — cinterop klib with `libquiche.a` embedded (transitive static link)
+        //   AAR  — `libquiche.so` in jniLibs (AGP auto-merges into consumer APKs)
+        //   JAR  — `libquiche.{dylib,so,dll}` resources (KicheLoader extracts at runtime)
+        iosMain.dependencies { api(libs.libquiche) }
+        androidMain.dependencies { api(libs.libquiche) }
+        jvmMain.dependencies { api(libs.libquiche) }
         val androidAndJvmMain by creating {
             dependsOn(commonMain.get())
         }
@@ -133,33 +138,32 @@ tasks.matching { it.name.contains("compileTestKotlinIos") }.configureEach {
     dependsOn(generateTestConstants)
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Native quiche build (Rust/Cargo instead of C/autotools)
-// ────────────────────────────────────────────────────────────────────────────
-
-val buildQuicheAppleDir = layout.buildDirectory.dir("quiche")
-val buildQuicheApple by tasks.register<Exec>("buildQuicheApple") {
-    group = "build"
-    description = "Build quiche for macOS/iOS arm64/x86_64 via cargo"
-    inputs.file(project.rootProject.file("scripts/build_quiche_apple.sh"))
-    outputs.dir(buildQuicheAppleDir)
-
-    commandLine("bash", "-c", "../scripts/build_quiche_apple.sh")
-}
-
+// macOS host JNI compile. Linux/Windows have their own scripts driven by
+// per-OS CI runners (scripts/build_quiche_jni_{linux.sh,windows.ps1}).
 val buildJniMacosFolder = rootProject.layout.buildDirectory.dir("buildJniMacos")
 val buildJniMacos by tasks.register<Exec>("buildJniMacos") {
     group = "build"
-    description = "Build JNI libs for macOS arm64/x86_64"
-    dependsOn(buildQuicheApple)
+    description = "Build macOS JNI wrapper, dynamically linked against libquiche.dylib"
+    dependsOn(extractLibquicheJvmNative, extractLibquicheHeaders)
     inputs.dir(project.layout.projectDirectory.dir("jni"))
     outputs.dir(buildJniMacosFolder)
+
+    environment(
+        "LIBQUICHE_JVM_NATIVE_ROOT",
+        layout.buildDirectory.dir("libquiche-jvm/native/macos").get().asFile.absolutePath,
+    )
+    environment(
+        "QUICHE_INCLUDE_DIR",
+        layout.buildDirectory.dir("libquiche-headers/include").get().asFile.absolutePath,
+    )
 
     commandLine("bash", "-c", "../scripts/build_quiche_jni.sh")
 }
 
-// Build-time-only configuration that resolves the :libquiche-android AAR file
-// for unpacking — feeds AGP CMake via the `extractLibquicheAndroidJni` task.
+// Build-time-only configurations that resolve the per-target libquiche artifacts
+// for unpacking. Distinct from the KMP `api(libs.libquiche)` declarations above —
+// those wire the runtime dependency graph; these give Gradle tasks the concrete
+// AAR / JAR files to extract `.so` / `.dylib` / `quiche.h` from.
 val libquicheNative by configurations.creating {
     isCanBeResolved = true
     isCanBeConsumed = false
@@ -167,6 +171,24 @@ val libquicheNative by configurations.creating {
 dependencies.add(
     "libquicheNative",
     "eu.buney.libquiche:libquiche-android:${libs.versions.libquiche.get()}@aar",
+)
+
+val libquicheNativeJvm by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+}
+dependencies.add(
+    "libquicheNativeJvm",
+    "eu.buney.libquiche:libquiche-jvm:${libs.versions.libquiche.get()}",
+)
+
+val libquicheHeaders by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+}
+dependencies.add(
+    "libquicheHeaders",
+    "eu.buney.libquiche:libquiche-headers:${libs.versions.libquiche.get()}",
 )
 
 // A generic (non-typed) task + `doLast` + `unzipTo` is configuration-cache safe;
@@ -188,9 +210,37 @@ val extractLibquicheAndroidJni by tasks.registering {
     }
 }
 
-tasks.named { "ios" in it }.configureEach {
-    if (!project.hasProperty("ci.skip.native.build")) {
-        dependsOn(buildQuicheApple)
+val extractLibquicheJvmNative by tasks.registering {
+    group = "build"
+    description = "Unzip the :libquiche-jvm JAR — populates native/<os>/<arch>/libquiche.{dylib,so,dll}"
+    inputs.files(libquicheNativeJvm)
+    outputs.dir(layout.buildDirectory.dir("libquiche-jvm"))
+
+    val artifactsProvider = libquicheNativeJvm.incoming.artifactView { lenient(true) }.artifacts
+
+    doLast {
+        val outDir = outputs.files.singleFile
+        outDir.deleteRecursively()
+        artifactsProvider.artifacts.forEach { artifact ->
+            unzipTo(outDir, artifact.file)
+        }
+    }
+}
+
+val extractLibquicheHeaders by tasks.registering {
+    group = "build"
+    description = "Unzip the :libquiche-headers JAR — populates include/quiche.h"
+    inputs.files(libquicheHeaders)
+    outputs.dir(layout.buildDirectory.dir("libquiche-headers"))
+
+    val artifactsProvider = libquicheHeaders.incoming.artifactView { lenient(true) }.artifacts
+
+    doLast {
+        val outDir = outputs.files.singleFile
+        outDir.deleteRecursively()
+        artifactsProvider.artifacts.forEach { artifact ->
+            unzipTo(outDir, artifact.file)
+        }
     }
 }
 
@@ -248,12 +298,9 @@ tasks.named<Test>("jvmTest") {
 val cleanBuildJniMacos by tasks.registering(Delete::class) {
     delete(buildJniMacosFolder)
 }
-val cleanBuildQuicheApple by tasks.registering(Delete::class) {
-    delete(buildQuicheAppleDir)
-}
 
 tasks.named("clean") {
-    dependsOn(cleanBuildJniMacos, cleanBuildQuicheApple)
+    dependsOn(cleanBuildJniMacos)
 }
 
 group = "eu.buney.kiche"

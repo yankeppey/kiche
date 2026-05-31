@@ -172,6 +172,21 @@ val stageLibquicheJvmResources by tasks.registering(Copy::class) {
     }
 
     into(dest)
+
+    // cargo stamps cdylib with an absolute `install_name` pointing into
+    // /usr/local/lib. Rewrite to `@rpath/libquiche.dylib` so dyld matches
+    // against an already-`System.load`-ed copy by name at runtime.
+    doLast {
+        val destDir = dest.asFile
+        destDir.walkTopDown()
+            .filter { it.isFile && it.name == "libquiche.dylib" }
+            .forEach { dylib ->
+                val rc = ProcessBuilder(
+                    "install_name_tool", "-id", "@rpath/libquiche.dylib", dylib.absolutePath
+                ).inheritIO().start().waitFor()
+                if (rc != 0) error("install_name_tool failed for ${dylib.absolutePath} (exit $rc)")
+            }
+    }
 }
 
 tasks.named("jvmJar") { dependsOn(stageLibquicheJvmResources) }

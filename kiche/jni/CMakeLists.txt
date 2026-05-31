@@ -57,23 +57,20 @@ if(ANDROID)
 
     target_link_libraries(quiche_jni PRIVATE quiche ${JNI_LIBRARIES} m)
 else ()
+    # Desktop JVM JNI links dynamically against libquiche.{dylib,so,dll}; the
+    # path is provided by Gradle from the unpacked :libquiche-jvm artifact.
     if(NOT DEFINED QUICHE_LIB_PATH)
-        set(QUICHE_LIB_PATH ${CMAKE_CURRENT_LIST_DIR}/../../build/quiche/macosx/${CMAKE_SYSTEM_PROCESSOR}/lib/libquiche.a)
+        message(FATAL_ERROR "QUICHE_LIB_PATH must point at libquiche.{dylib,so,dll} — run via Gradle.")
     endif()
-    add_library(quiche STATIC IMPORTED)
+    add_library(quiche SHARED IMPORTED)
     set_target_properties(quiche PROPERTIES IMPORTED_LOCATION "${QUICHE_LIB_PATH}")
 
     if (WIN32)
         # MSVC omits the "lib" prefix on DLLs; force it so the artifact is
         # libquiche_jni.dll — the exact name KicheLoader.load() looks up.
         set_target_properties(quiche_jni PROPERTIES PREFIX "lib")
-        # quiche + its vendored BoringSSL pull in these Win32 system libraries.
-        # (No libm on MSVC, and JNI symbols are resolved by the host JVM at load
-        # time, so we don't link the jvm import library here.)
-        target_link_libraries(quiche_jni PRIVATE quiche
-            ws2_32 userenv ntdll bcrypt crypt32 advapi32)
+        target_link_libraries(quiche_jni PRIVATE quiche)
     else()
-        # macOS and Linux both link libm.
         target_link_libraries(quiche_jni PRIVATE quiche m)
     endif()
 endif()
