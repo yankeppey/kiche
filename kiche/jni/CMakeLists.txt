@@ -75,7 +75,11 @@ else ()
         # MSVC omits the "lib" prefix on DLLs; force it so the artifact is
         # libquiche_jni.dll — the exact name KicheLoader.load() looks up.
         set_target_properties(quiche_jni PROPERTIES PREFIX "lib")
-        target_link_libraries(quiche_jni PRIVATE quiche)
+        # ws2_32 is needed for htons/ntohs in helpers.c (Winsock is the Windows
+        # equivalent of <arpa/inet.h>). Other Win32 deps libquiche pulled in
+        # statically before (bcrypt, crypt32, advapi32, ntdll, userenv) are now
+        # linked into libquiche.dll itself.
+        target_link_libraries(quiche_jni PRIVATE quiche ws2_32)
     else()
         target_link_libraries(quiche_jni PRIVATE quiche m)
     endif()
