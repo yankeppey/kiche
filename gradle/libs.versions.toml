@@ -1,6 +1,7 @@
 [versions]
 agp = "9.2.1"
 kiche = "0.1.0-alpha.2"
+libquiche = "0.28.0-1-SNAPSHOT"
 kotlin = "2.3.21"
 ktor = "3.5.0"
 kotlinx-coroutines = "1.11.0"
@@ -26,6 +27,8 @@ kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-t
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version = "2.0.18" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
 kermit = { module = "co.touchlab:kermit", version.ref = "kermit" }
+libquiche = { module = "eu.buney.libquiche:libquiche", version.ref = "libquiche" }
+libquiche-headers = { module = "eu.buney.libquiche:libquiche-headers", version.ref = "libquiche" }
 
 [plugins]
 androidLibrary = { id = "com.android.library", version.ref = "agp" }
