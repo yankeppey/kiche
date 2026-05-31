@@ -57,15 +57,21 @@ if(ANDROID)
 
     target_link_libraries(quiche_jni PRIVATE quiche ${JNI_LIBRARIES} m)
 else ()
-    # Desktop JVM JNI links dynamically against libquiche.{dylib,so,dll}; the
-    # path is provided by Gradle from the unpacked :libquiche-jvm artifact.
+    # Desktop JVM JNI links dynamically against libquiche.{dylib,so} / quiche.dll;
+    # the path is provided by Gradle from the unpacked :libquiche-jvm artifact.
     if(NOT DEFINED QUICHE_LIB_PATH)
-        message(FATAL_ERROR "QUICHE_LIB_PATH must point at libquiche.{dylib,so,dll} — run via Gradle.")
+        message(FATAL_ERROR "QUICHE_LIB_PATH must point at the libquiche dynamic library — run via Gradle.")
     endif()
     add_library(quiche SHARED IMPORTED)
     set_target_properties(quiche PROPERTIES IMPORTED_LOCATION "${QUICHE_LIB_PATH}")
 
     if (WIN32)
+        # CMake's SHARED IMPORTED on Windows needs the import library (.dll.lib)
+        # at link time, separate from the runtime DLL given in IMPORTED_LOCATION.
+        if(NOT DEFINED QUICHE_IMPLIB)
+            message(FATAL_ERROR "QUICHE_IMPLIB must point at the import library (quiche.dll.lib) on Windows.")
+        endif()
+        set_target_properties(quiche PROPERTIES IMPORTED_IMPLIB "${QUICHE_IMPLIB}")
         # MSVC omits the "lib" prefix on DLLs; force it so the artifact is
         # libquiche_jni.dll — the exact name KicheLoader.load() looks up.
         set_target_properties(quiche_jni PROPERTIES PREFIX "lib")

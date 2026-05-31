@@ -32,21 +32,24 @@ if (-not $env:LIBQUICHE_JVM_NATIVE_ROOT) { throw "LIBQUICHE_JVM_NATIVE_ROOT must
 if (-not $env:QUICHE_INCLUDE_DIR)        { throw "QUICHE_INCLUDE_DIR must be set" }
 
 $LibquicheDir = Join-Path $env:LIBQUICHE_JVM_NATIVE_ROOT $Arch
+$Dll          = Join-Path $LibquicheDir "quiche.dll"
 $ImportLib    = Join-Path $LibquicheDir "quiche.dll.lib"
-if (-not (Test-Path $ImportLib)) {
-  throw "Could not find $ImportLib (quiche import library)"
-}
+if (-not (Test-Path $Dll))       { throw "Could not find $Dll" }
+if (-not (Test-Path $ImportLib)) { throw "Could not find $ImportLib (quiche import library)" }
 
 $JniOut = Join-Path $ProjectRoot "build/buildJniWindows/$Arch"
 
 if (-not $env:JAVA_HOME) { Write-Warning "JAVA_HOME not set — CMake's FindJNI may fail to locate jni.h" }
 
+# On Windows, CMake's SHARED IMPORTED target needs both IMPORTED_LOCATION
+# (the runtime DLL) and IMPORTED_IMPLIB (the link-time import library).
 New-Item -ItemType Directory -Force -Path $JniOut | Out-Null
 cmake -B $JniOut -S $SrcDir `
   -DCMAKE_BUILD_TYPE=Release `
   -DJAVA_HOME="$env:JAVA_HOME" `
   -DQUICHE_INCLUDE_DIR="$env:QUICHE_INCLUDE_DIR" `
-  -DQUICHE_LIB_PATH="$ImportLib"
+  -DQUICHE_LIB_PATH="$Dll" `
+  -DQUICHE_IMPLIB="$ImportLib"
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 
 cmake --build $JniOut --config Release
