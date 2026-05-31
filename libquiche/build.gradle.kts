@@ -168,7 +168,8 @@ val stageLibquicheJvmResources by tasks.registering(Copy::class) {
             into("linux/arm64")
         }
         from("$dir/windows/x86_64") {
-            include("libquiche.dll", "libquiche.dll.lib")
+            // cargo's MSVC cdylib output is `quiche.{dll,dll.lib}` — no `lib` prefix
+            include("quiche.dll", "quiche.dll.lib")
             into("windows/x86_64")
         }
     }

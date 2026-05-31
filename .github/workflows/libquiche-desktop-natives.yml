@@ -63,8 +63,8 @@ jobs:
             cp build/quiche/linux/x86_64/libquiche.so staged/linux/x86_64/
           else
             mkdir -p staged/windows/x86_64
-            cp build/quiche/windows/x86_64/libquiche.dll     staged/windows/x86_64/
-            cp build/quiche/windows/x86_64/libquiche.dll.lib staged/windows/x86_64/
+            cp build/quiche/windows/x86_64/quiche.dll     staged/windows/x86_64/
+            cp build/quiche/windows/x86_64/quiche.dll.lib staged/windows/x86_64/
           fi
 
       - uses: actions/upload-artifact@v7

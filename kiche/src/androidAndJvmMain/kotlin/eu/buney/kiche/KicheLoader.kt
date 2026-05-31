@@ -49,7 +49,15 @@ object KicheLoader {
             else -> throw RuntimeException("Unsupported OS: $os")
         }
 
-        val libFileName = "$libBaseName.$ext"
+        // Windows quiche has no `lib` prefix — that's cargo's MSVC cdylib output
+        // convention, and the same name is encoded in the import library that
+        // libquiche_jni.dll links against. Our own JNI wrapper still uses the
+        // `lib` prefix (forced via CMake) so the runtime lookup stays uniform.
+        val libFileName = if (os.contains("windows") && libBaseName == "libquiche") {
+            "quiche.dll"
+        } else {
+            "$libBaseName.$ext"
+        }
         val resourcePath = "/native/$osPath/$archPath/$libFileName"
         val extracted = extractToTemp(resourcePath, libBaseName)
         System.load(extracted.toAbsolutePath().toString())

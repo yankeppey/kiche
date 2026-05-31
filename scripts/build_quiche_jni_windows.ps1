@@ -9,7 +9,7 @@
 
 .NOTES
   Required env vars:
-    LIBQUICHE_JVM_NATIVE_ROOT — dir containing <arch>/libquiche.dll
+    LIBQUICHE_JVM_NATIVE_ROOT — dir containing <arch>/quiche.dll
                                 (the .dll.lib import library must sit alongside)
     QUICHE_INCLUDE_DIR        — dir containing quiche.h
 
@@ -32,9 +32,9 @@ if (-not $env:LIBQUICHE_JVM_NATIVE_ROOT) { throw "LIBQUICHE_JVM_NATIVE_ROOT must
 if (-not $env:QUICHE_INCLUDE_DIR)        { throw "QUICHE_INCLUDE_DIR must be set" }
 
 $LibquicheDir = Join-Path $env:LIBQUICHE_JVM_NATIVE_ROOT $Arch
-$ImportLib    = Join-Path $LibquicheDir "libquiche.dll.lib"
+$ImportLib    = Join-Path $LibquicheDir "quiche.dll.lib"
 if (-not (Test-Path $ImportLib)) {
-  throw "Could not find $ImportLib (libquiche import library)"
+  throw "Could not find $ImportLib (quiche import library)"
 }
 
 $JniOut = Join-Path $ProjectRoot "build/buildJniWindows/$Arch"
