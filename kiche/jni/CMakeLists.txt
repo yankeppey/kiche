@@ -39,10 +39,14 @@ endif()
 target_include_directories(quiche_jni PRIVATE ${QUICHE_INCLUDE_DIR})
 
 if(ANDROID)
-    set(PREBUILT_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../build/quiche/android)
-    set(QUICHE_LIB ${PREBUILT_ROOT}/${ANDROID_ABI}/lib/libquiche.a)
+    # libquiche.so is unpacked from :libquiche-android's AAR by Gradle and the
+    # path passed in via LIBQUICHE_ANDROID_JNI_DIR.
+    if(NOT DEFINED LIBQUICHE_ANDROID_JNI_DIR)
+        message(FATAL_ERROR "LIBQUICHE_ANDROID_JNI_DIR is not set — run via Gradle.")
+    endif()
+    set(QUICHE_LIB ${LIBQUICHE_ANDROID_JNI_DIR}/${ANDROID_ABI}/libquiche.so)
 
-    add_library(quiche STATIC IMPORTED)
+    add_library(quiche SHARED IMPORTED)
     set_target_properties(quiche PROPERTIES IMPORTED_LOCATION ${QUICHE_LIB})
 
     # 16KB page size alignment for Android 15+ compatibility

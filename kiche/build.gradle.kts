@@ -1,5 +1,6 @@
 import com.android.build.gradle.tasks.ExternalNativeBuildTask
 import org.gradle.jvm.tasks.Jar
+import org.gradle.kotlin.dsl.support.unzipTo
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -17,6 +18,16 @@ android {
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64") }
 
         consumerProguardFiles("consumer-rules.pro")
+
+        // Path is populated by `extractLibquicheAndroidJni`; CMakeLists reads
+        // `${LIBQUICHE_ANDROID_JNI_DIR}/<abi>/libquiche.so`.
+        externalNativeBuild {
+            cmake {
+                arguments += "-DLIBQUICHE_ANDROID_JNI_DIR=${
+                    layout.buildDirectory.dir("libquiche-android/jni").get().asFile.absolutePath
+                }"
+            }
+        }
     }
 
     packaging {
@@ -30,9 +41,8 @@ android {
             path = file("jni/CMakeLists.txt")
         }
     }
-    // Ensure quiche is built before NDK build
     tasks.withType<ExternalNativeBuildTask>().configureEach {
-        dependsOn(buildQuicheAndroid)
+        dependsOn(extractLibquicheAndroidJni)
     }
 }
 
@@ -74,6 +84,9 @@ kotlin {
             implementation(libs.kotlin.test)
         }
         iosMain.dependencies {
+            api(libs.libquiche)
+        }
+        androidMain.dependencies {
             api(libs.libquiche)
         }
         val androidAndJvmMain by creating {
@@ -145,19 +158,34 @@ val buildJniMacos by tasks.register<Exec>("buildJniMacos") {
     commandLine("bash", "-c", "../scripts/build_quiche_jni.sh")
 }
 
-val buildQuicheAndroidDir = rootDir.resolve("build/quiche/android")
-val buildQuicheAndroid by tasks.register<Exec>("buildQuicheAndroid") {
+// Build-time-only configuration that resolves the :libquiche-android AAR file
+// for unpacking — feeds AGP CMake via the `extractLibquicheAndroidJni` task.
+val libquicheNative by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+}
+dependencies.add(
+    "libquicheNative",
+    "eu.buney.libquiche:libquiche-android:${libs.versions.libquiche.get()}@aar",
+)
+
+// A generic (non-typed) task + `doLast` + `unzipTo` is configuration-cache safe;
+// typed Copy/Sync tasks pulling from `zipTree(...)` fail to serialize.
+val extractLibquicheAndroidJni by tasks.registering {
     group = "build"
-    description = "Build quiche for Android via cargo-ndk"
+    description = "Unzip the :libquiche-android AAR — populates jni/<abi>/libquiche.so"
+    inputs.files(libquicheNative)
+    outputs.dir(layout.buildDirectory.dir("libquiche-android"))
 
-    workingDir = rootDir
+    val artifactsProvider = libquicheNative.incoming.artifactView { lenient(true) }.artifacts
 
-    inputs.file(rootDir.resolve("scripts/build_quiche_android.sh"))
-    outputs.dir(buildQuicheAndroidDir)
-
-    environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
-
-    commandLine("bash", "-c", "./scripts/build_quiche_android.sh")
+    doLast {
+        val outDir = outputs.files.singleFile
+        outDir.deleteRecursively()
+        artifactsProvider.artifacts.forEach { artifact ->
+            unzipTo(outDir, artifact.file)
+        }
+    }
 }
 
 tasks.named { "ios" in it }.configureEach {
@@ -217,9 +245,6 @@ tasks.named<Test>("jvmTest") {
     }
 }
 
-val cleanBuildQuicheAndroid by tasks.registering(Delete::class) {
-    delete(buildQuicheAndroidDir)
-}
 val cleanBuildJniMacos by tasks.registering(Delete::class) {
     delete(buildJniMacosFolder)
 }
@@ -228,7 +253,7 @@ val cleanBuildQuicheApple by tasks.registering(Delete::class) {
 }
 
 tasks.named("clean") {
-    dependsOn(cleanBuildQuicheAndroid, cleanBuildJniMacos, cleanBuildQuicheApple)
+    dependsOn(cleanBuildJniMacos, cleanBuildQuicheApple)
 }
 
 group = "eu.buney.kiche"
